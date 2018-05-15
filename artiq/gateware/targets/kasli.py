@@ -397,11 +397,11 @@ class eemTester(_StandaloneBase):
         self.config["RTIO_FREQUENCY"] = "125.0"
 
         platform = self.platform
-        platform.add_extension(_dio("eem0"))
-        platform.add_extension(_dio("eem1"))
+        # platform.add_extension(_dio("eem0"))
+        # platform.add_extension(_dio("eem1"))
         platform.add_extension(_sampler("eem3", "eem2"))
         # platform.add_extension(_dio("eem2"))
-        platform.add_extension(_novogorny("eem3"))
+        # platform.add_extension(_novogorny("eem3"))
         platform.add_extension(_urukul("eem5", "eem4"))
         platform.add_extension(_urukul("eem6"))
         platform.add_extension(_zotino("eem7"))
@@ -413,16 +413,16 @@ class eemTester(_StandaloneBase):
             pass
 
         rtio_channels = []
-        for i in range(16):
-            eem, port = divmod(i, 8)
-            pads = platform.request("eem{}".format(eem), port)
-            if i < 4:
-                cls = ttl_serdes_7series.InOut_8X
-            else:
-                cls = ttl_serdes_7series.Output_8X
-            phy = cls(pads.p, pads.n)
-            self.submodules += phy
-            rtio_channels.append(rtio.Channel.from_phy(phy))
+        # for i in range(16):
+        #     eem, port = divmod(i, 8)
+        #     pads = platform.request("eem{}".format(eem), port)
+        #     if i < 4:
+        #         cls = ttl_serdes_7series.InOut_8X
+        #     else:
+        #         cls = ttl_serdes_7series.Output_8X
+        #     phy = cls(pads.p, pads.n)
+        #     self.submodules += phy
+        #     rtio_channels.append(rtio.Channel.from_phy(phy))
 
         # # EEM3: Novogorny
         # phy = spi2.SPIMaster(self.platform.request("eem3_spi_p"),
