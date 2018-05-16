@@ -11,7 +11,7 @@
  */
 
 mod clock_mux {
-    use board::csr;
+    use board_misoc::csr;
 
     const CLK_SRC_EXT_SEL : u8 = 1 << 0;
     const REF_CLK_SRC_SEL : u8 = 1 << 1;
@@ -28,7 +28,7 @@ mod clock_mux {
 }
 
 mod hmc830 {
-    use board::{csr, clock};
+    use board_misoc::{csr, clock};
 
     const HMC830_WRITES: [(u8, u32); 16] = [
         (0x0, 0x20),
@@ -92,7 +92,7 @@ mod hmc830 {
         }
     }
 
-    pub fn init() -> Result<(), &'static str> {
+    pub fn detect() -> Result<(), &'static str> {
         spi_setup();
         let id = read(0x00);
         if id != 0xa7975 {
@@ -101,6 +101,12 @@ mod hmc830 {
         } else {
             info!("HMC830 found");
         }
+
+        Ok(())
+    }
+
+    pub fn init() -> Result<(), &'static str> {
+        spi_setup();
         info!("HMC830 configuration...");
         for &(addr, data) in HMC830_WRITES.iter() {
             write(addr, data);
@@ -125,7 +131,7 @@ mod hmc830 {
 }
 
 pub mod hmc7043 {
-    use board::csr;
+    use board_misoc::csr;
 
     // To do: check which output channels we actually need
     const DAC_CLK_DIV: u32 = 2;
@@ -196,7 +202,7 @@ pub mod hmc7043 {
         }
     }
 
-    pub fn init() -> Result<(), &'static str> {
+    pub fn detect() -> Result<(), &'static str> {
         spi_setup();
         let id = (read(0x78) as u32) << 16 | (read(0x79) as u32) << 8 | read(0x7a) as u32;
         if id != 0xf17904 {
@@ -205,6 +211,20 @@ pub mod hmc7043 {
         } else {
             info!("HMC7043 found");
         }
+
+        Ok(())
+    }
+
+    pub fn shutdown() -> Result<(), &'static str> {
+        spi_setup();
+        info!("HMC7043 shutdown...");
+        write(0x1, 0x1);   // Sleep mode
+
+        Ok(())
+    }
+
+    pub fn init() -> Result<(), &'static str> {
+        spi_setup();
         info!("HMC7043 configuration...");
 
         write(0x0, 0x1);   // Software reset
@@ -272,6 +292,9 @@ pub mod hmc7043 {
 pub fn init() -> Result<(), &'static str> {
     clock_mux::init();
     /* must be the first SPI init because of HMC830 SPI mode selection */
+    hmc830::detect()?;
+    hmc7043::detect()?;
+    hmc7043::shutdown()?;
     hmc830::init()?;
     hmc7043::init()
 }
