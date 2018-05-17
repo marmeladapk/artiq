@@ -57,6 +57,7 @@ mod moninj;
 mod analyzer;
 
 fn startup() {
+    irq::set_mask(0);
     irq::set_ie(true);
     clock::init();
     info!("ARTIQ runtime starting...");
@@ -305,12 +306,16 @@ pub extern fn abort() {
 #[lang = "panic_fmt"]
 pub extern fn panic_fmt(args: core::fmt::Arguments, file: &'static str,
                         line: u32, column: u32) -> ! {
+    irq::set_ie(false);
+
     println!("panic at {}:{}:{}: {}", file, line, column, args);
 
     println!("backtrace for software version {}:",
              include_str!(concat!(env!("OUT_DIR"), "/git-describe")));
     let _ = unwind_backtrace::backtrace(|ip| {
-        println!("{:#08x}", ip);
+        // Backtrace gives us the return address, i.e. the address after the delay slot,
+        // but we're interested in the call instruction.
+        println!("{:#08x}", ip - 2 * 4);
     });
 
     if config::read_str("panic_reset", |r| r == Ok("1")) {

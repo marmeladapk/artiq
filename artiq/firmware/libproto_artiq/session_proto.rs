@@ -79,51 +79,6 @@ pub enum Request {
         column:   u32,
         function: String,
     },
-
-    FlashRead   { key: String },
-    FlashWrite  { key: String, value: Vec<u8> },
-    FlashRemove { key: String },
-    FlashErase,
-}
-
-impl Request {
-    pub fn read_from<R>(reader: &mut R) -> Result<Self, Error<R::ReadError>>
-        where R: Read + ?Sized
-    {
-        read_sync(reader)?;
-        Ok(match reader.read_u8()? {
-            3  => Request::SystemInfo,
-            4  => Request::SwitchClock(reader.read_u8()?),
-            5  => Request::LoadKernel(reader.read_bytes()?),
-            6  => Request::RunKernel,
-            7  => Request::RpcReply {
-                tag: reader.read_bytes()?
-            },
-            8  => Request::RpcException {
-                name:     reader.read_string()?,
-                message:  reader.read_string()?,
-                param:    [reader.read_u64()? as i64,
-                           reader.read_u64()? as i64,
-                           reader.read_u64()? as i64],
-                file:     reader.read_string()?,
-                line:     reader.read_u32()?,
-                column:   reader.read_u32()?,
-                function: reader.read_string()?
-            },
-            9  => Request::FlashRead {
-                key: reader.read_string()?
-            },
-            10 => Request::FlashWrite {
-                key:   reader.read_string()?,
-                value: reader.read_bytes()?
-            },
-            11 => Request::FlashErase,
-            12 => Request::FlashRemove {
-                key: reader.read_string()?
-            },
-            ty  => return Err(Error::UnknownPacket(ty))
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -153,12 +108,46 @@ pub enum Reply<'a> {
 
     RpcRequest { async: bool },
 
-    FlashRead(&'a [u8]),
-    FlashOk,
-    FlashError,
-
     WatchdogExpired,
     ClockFailure,
+}
+
+impl Request {
+    pub fn read_from<R>(reader: &mut R) -> Result<Self, Error<R::ReadError>>
+        where R: Read + ?Sized
+    {
+        read_sync(reader)?;
+        Ok(match reader.read_u8()? {
+            // 1-2, 13 were log requests
+
+            3  => Request::SystemInfo,
+            4  => Request::SwitchClock(reader.read_u8()?),
+
+            5  => Request::LoadKernel(reader.read_bytes()?),
+            6  => Request::RunKernel,
+
+            7  => Request::RpcReply {
+                tag: reader.read_bytes()?
+            },
+            8  => Request::RpcException {
+                name:     reader.read_string()?,
+                message:  reader.read_string()?,
+                param:    [reader.read_u64()? as i64,
+                           reader.read_u64()? as i64,
+                           reader.read_u64()? as i64],
+                file:     reader.read_string()?,
+                line:     reader.read_u32()?,
+                column:   reader.read_u32()?,
+                function: reader.read_string()?
+            },
+
+            // 9-12 were flash requests
+
+            // 14 was hotswap request
+
+            ty  => return Err(Error::UnknownPacket(ty))
+        })
+    }
 }
 
 impl<'a> Reply<'a> {
@@ -167,6 +156,8 @@ impl<'a> Reply<'a> {
     {
         write_sync(writer)?;
         match *self {
+            // 1 was log reply
+
             Reply::SystemInfo { ident, finished_cleanly } => {
                 writer.write_u8(2)?;
                 writer.write(b"AROR")?;
@@ -218,16 +209,7 @@ impl<'a> Reply<'a> {
                 writer.write_u8(async as u8)?;
             },
 
-            Reply::FlashRead(ref bytes) => {
-                writer.write_u8(11)?;
-                writer.write_bytes(bytes)?;
-            },
-            Reply::FlashOk => {
-                writer.write_u8(12)?;
-            },
-            Reply::FlashError => {
-                writer.write_u8(13)?;
-            },
+            // 11-13 were flash requests
 
             Reply::WatchdogExpired => {
                 writer.write_u8(14)?;
@@ -235,6 +217,8 @@ impl<'a> Reply<'a> {
             Reply::ClockFailure => {
                 writer.write_u8(15)?;
             },
+
+            // 16 was hotswap imminent reply
         }
         Ok(())
     }
