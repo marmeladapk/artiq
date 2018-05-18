@@ -382,11 +382,11 @@ def _urukul_qspi(eem0, eem1):
 
 class eemTester(_StandaloneBase):
     """
-    Opticlock extension variant configuration
+    Variant for testing various EEMs.
     """
     def __init__(self, hw_rev=None, **kwargs):
         if hw_rev is None:
-            hw_rev = "v1.0"
+            hw_rev = "v1.1"
         _StandaloneBase.__init__(self, hw_rev=hw_rev, **kwargs)
 
         self.config["SI5324_AS_SYNTHESIZER"] = None
@@ -394,14 +394,6 @@ class eemTester(_StandaloneBase):
         self.config["RTIO_FREQUENCY"] = "125.0"
 
         platform = self.platform
-        # platform.add_extension(_dio("eem0"))
-        # platform.add_extension(_dio("eem1"))
-        platform.add_extension(_sampler("eem3", "eem2"))
-        # platform.add_extension(_dio("eem2"))
-        # platform.add_extension(_novogorny("eem3"))
-        platform.add_extension(_urukul("eem5", "eem4"))
-        platform.add_extension(_urukul("eem6"))
-        platform.add_extension(_zotino("eem7"))
 
         try:
             # EEM clock fan-out from Si5324, not MMCX, only Kasli/v1.0
@@ -409,7 +401,106 @@ class eemTester(_StandaloneBase):
         except ConstraintError:
             pass
 
-        rtio_channels = []
+        self.rtio_channels = rtio_channels = []
+
+        # EEM 0 and 1 - DIO RJ45
+        self.add_dio("eem0")
+        self.add_dio("eem1")
+        self.add_dio("eem4")
+
+        # EEM3, EEM2: Sampler
+        self.add_sampler("eem3", "eem2")
+
+        # EEM5 + EEM4: Urukul
+        # self.add_urukul("eem5", "eem4")
+
+        # EEM7: Zotino
+        # self.add_zotino("eem7")
+
+        for i in (1, 2):
+            sfp_ctl = platform.request("sfp_ctl", i)
+            phy = ttl_simple.Output(sfp_ctl.led)
+            self.submodules += phy
+            rtio_channels.append(rtio.Channel.from_phy(phy))
+
+        self.config["HAS_RTIO_LOG"] = None
+        self.config["RTIO_LOG_CHANNEL"] = len(rtio_channels)
+        rtio_channels.append(rtio.LogChannel())
+
+        self.add_rtio(rtio_channels)
+
+    # Functions below don't throw when eem is used second time, careful to not duplicate eems!
+    def add_dio(self, eem):
+        """
+        Add I/O extension with 8 RTIO channels
+        :param eem: EEM number in form of "eemx"
+        """
+        self.platform.add_extension(_dio(eem))
+        for i in range(8):
+            # eem, port = divmod(i, 8)
+            # pads = self.platform.request("eem{}".format(eem), port)
+            pads = self.platform.request(eem, i)
+            # if i < 4:
+            cls = ttl_serdes_7series.InOut_8X
+            # else:
+            #     cls = ttl_serdes_7series.Output_8X
+            phy = cls(pads.p, pads.n)
+            self.submodules += phy
+            self.rtio_channels.append(rtio.Channel.from_phy(phy))
+
+    def add_sampler(self, eem0, eem1):
+        self.platform.add_extension(_sampler(eem0, eem1))
+        phy = spi2.SPIMaster(self.platform.request(eem0+"_adc_spi_p"),
+                             self.platform.request(eem0+"_adc_spi_n"))
+        self.submodules += phy
+        self.rtio_channels.append(rtio.Channel.from_phy(phy, ififo_depth=16))
+        phy = spi2.SPIMaster(self.platform.request(eem0+"_pgia_spi_p"),
+                             self.platform.request(eem0+"_pgia_spi_n"))
+        self.submodules += phy
+        self.rtio_channels.append(rtio.Channel.from_phy(phy, ififo_depth=2))
+
+        for signal in "cnv".split():
+            pads = self.platform.request(eem0+"_{}".format(signal))
+            phy = ttl_serdes_7series.Output_8X(pads.p, pads.n)
+            self.submodules += phy
+            self.rtio_channels.append(rtio.Channel.from_phy(phy))
+
+        pads = self.platform.request(eem0+"_sdr")
+        self.specials += DifferentialOutput(1, pads.p, pads.n)
+
+    def add_urukul(self, eem0, eem1):
+        self.platform.add_extension(_urukul(eem0, eem1))
+        phy = spi2.SPIMaster(self.platform.request(eem0+"_spi_p"),
+                             self.platform.request(eem0+"_spi_n"))
+        self.submodules += phy
+        self.rtio_channels.append(rtio.Channel.from_phy(phy, ififo_depth=4))
+
+        pads = self.platform.request(eem0+"_dds_reset")
+        self.specials += DifferentialOutput(0, pads.p, pads.n)
+
+        for signal in "io_update sw0 sw1 sw2 sw3".split():
+            pads = self.platform.request(eem0+"_{}".format(signal))
+            phy = ttl_serdes_7series.Output_8X(pads.p, pads.n)
+            self.submodules += phy
+            self.rtio_channels.append(rtio.Channel.from_phy(phy))
+
+    def add_zotino(self, eem):
+        self.platform.add_extension(_zotino(eem))
+        phy = spi2.SPIMaster(self.platform.request(eem+"_spi_p"),
+                             self.platform.request(eem+"_spi_n"))
+        self.submodules += phy
+        self.rtio_channels.append(rtio.Channel.from_phy(phy, ififo_depth=4))
+
+        for signal in "ldac_n clr_n".split():
+            pads = self.platform.request(eem+"_{}".format(signal))
+            phy = ttl_serdes_7series.Output_8X(pads.p, pads.n)
+            self.submodules += phy
+            self.rtio_channels.append(rtio.Channel.from_phy(phy))
+
+    def old(self):
+        # platform.add_extension(_dio("eem0"))
+        # platform.add_extension(_dio("eem1"))
+        # platform.add_extension(_dio("eem2"))
         # for i in range(16):
         #     eem, port = divmod(i, 8)
         #     pads = platform.request("eem{}".format(eem), port)
@@ -422,6 +513,7 @@ class eemTester(_StandaloneBase):
         #     rtio_channels.append(rtio.Channel.from_phy(phy))
 
         # # EEM3: Novogorny
+        # platform.add_extension(_novogorny("eem3"))
         # phy = spi2.SPIMaster(self.platform.request("eem3_spi_p"),
         #         self.platform.request("eem3_spi_n"))
         # self.submodules += phy
@@ -433,6 +525,7 @@ class eemTester(_StandaloneBase):
         #     self.submodules += phy
         #     rtio_channels.append(rtio.Channel.from_phy(phy))
         # EEM3, EEM2: Sampler
+        platform.add_extension(_sampler("eem3", "eem2"))
         phy = spi2.SPIMaster(self.platform.request("eem3_adc_spi_p"),
                              self.platform.request("eem3_adc_spi_n"))
         self.submodules += phy
@@ -452,6 +545,7 @@ class eemTester(_StandaloneBase):
         self.specials += DifferentialOutput(1, pads.p, pads.n)
 
         # EEM5 + EEM4: Urukul
+        platform.add_extension(_urukul("eem5", "eem4"))
         phy = spi2.SPIMaster(self.platform.request("eem5_spi_p"),
                 self.platform.request("eem5_spi_n"))
         self.submodules += phy
@@ -473,6 +567,7 @@ class eemTester(_StandaloneBase):
             rtio_channels.append(rtio.Channel.from_phy(phy))
 
         # EEM6: Urukul
+        platform.add_extension(_urukul("eem6"))
         phy = spi2.SPIMaster(self.platform.request("eem6_spi_p"),
                 self.platform.request("eem6_spi_n"))
         self.submodules += phy
@@ -488,6 +583,7 @@ class eemTester(_StandaloneBase):
         self.specials += DifferentialOutput(0, pads.p, pads.n)
 
         # EEM7: Zotino
+        platform.add_extension(_zotino("eem7"))
         phy = spi2.SPIMaster(self.platform.request("eem7_spi_p"),
                 self.platform.request("eem7_spi_n"))
         self.submodules += phy
@@ -498,12 +594,6 @@ class eemTester(_StandaloneBase):
             phy = ttl_serdes_7series.Output_8X(pads.p, pads.n)
             self.submodules += phy
             rtio_channels.append(rtio.Channel.from_phy(phy))
-
-        self.config["HAS_RTIO_LOG"] = None
-        self.config["RTIO_LOG_CHANNEL"] = len(rtio_channels)
-        rtio_channels.append(rtio.LogChannel())
-
-        self.add_rtio(rtio_channels)
 
 
 class Opticlock(_StandaloneBase):
