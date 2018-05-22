@@ -38,13 +38,15 @@ device_db = {
     },
 }
 
+
 for i in range(8):
     device_db["ttl" + str(i)] = {
         "type": "local",
         "module": "artiq.coredevice.ttl",
-        "class": "TTLInOut",
+        "class": "TTLInOut" if i < 4 else "TTLOut",
         "arguments": {"channel": i},
     }
+
 
 device_db.update(
     spi_urukul0={
@@ -109,35 +111,65 @@ for i in range(4):
         }
     }
 
-for i in range(2):
-    device_db["spi_zotino{}".format(i)] = {
-        "type": "local",
-        "module": "artiq.coredevice.spi2",
-        "class": "SPIMaster",
-        "arguments": {"channel": 14+3*i+0}
+
+device_db["spi_sampler0_adc"] = {
+    "type": "local",
+    "module": "artiq.coredevice.spi2",
+    "class": "SPIMaster",
+    "arguments": {"channel": 14}
+}
+device_db["spi_sampler0_pgia"] = {
+    "type": "local",
+    "module": "artiq.coredevice.spi2",
+    "class": "SPIMaster",
+    "arguments": {"channel": 15}
+}
+device_db["spi_sampler0_cnv"] = {
+    "type": "local",
+    "module": "artiq.coredevice.ttl",
+    "class": "TTLOut",
+    "arguments": {"channel": 16},
+}
+device_db["sampler0"] = {
+    "type": "local",
+    "module": "artiq.coredevice.sampler",
+    "class": "Sampler",
+    "arguments": {
+        "spi_adc_device": "spi_sampler0_adc",
+        "spi_pgia_device": "spi_sampler0_pgia",
+        "cnv_device": "spi_sampler0_cnv"
     }
-    device_db["ttl_zotino{}_ldac".format(i)] = {
-        "type": "local",
-        "module": "artiq.coredevice.ttl",
-        "class": "TTLOut",
-        "arguments": {"channel": 14+3*i+1}
+}
+
+
+device_db["spi_zotino0"] = {
+    "type": "local",
+    "module": "artiq.coredevice.spi2",
+    "class": "SPIMaster",
+    "arguments": {"channel": 17}
+}
+device_db["ttl_zotino0_ldac"] = {
+    "type": "local",
+    "module": "artiq.coredevice.ttl",
+    "class": "TTLOut",
+    "arguments": {"channel": 18}
+}
+device_db["ttl_zotino0_clr"] = {
+    "type": "local",
+    "module": "artiq.coredevice.ttl",
+    "class": "TTLOut",
+    "arguments": {"channel": 19}
+}
+device_db["zotino0"] = {
+    "type": "local",
+    "module": "artiq.coredevice.zotino",
+    "class": "Zotino",
+    "arguments": {
+        "spi_device": "spi_zotino0",
+        "ldac_device": "ttl_zotino0_ldac",
+        "clr_device": "ttl_zotino0_clr"
     }
-    device_db["ttl_zotino{}_clr".format(i)] = {
-        "type": "local",
-        "module": "artiq.coredevice.ttl",
-        "class": "TTLOut",
-        "arguments": {"channel": 14+3*i+2}
-    }
-    device_db["zotino{}".format(i)] = {
-        "type": "local",
-        "module": "artiq.coredevice.zotino",
-        "class": "Zotino",
-        "arguments": {
-            "spi_device": "spi_zotino{}".format(i),
-            "ldac_device": "ttl_zotino{}_ldac".format(i),
-            "clr_device": "ttl_zotino{}_clr".format(i)
-        }
-    }
+}
 
 device_db.update(
     led0={
