@@ -25,9 +25,9 @@ class Sampler(EnvExperiment):
         self.gains = [0] * 8
         self.gains[self.mchan] = 0
 
-        # self.set_urukul()
-        for i in range(3):
-            self.sample(512, 5.5)
+        self.set_urukul()
+        for i in range(1):
+            self.sample(128, 6)
 
     @kernel
     def set_urukul(self):
@@ -40,25 +40,25 @@ class Sampler(EnvExperiment):
         self.urukul0_ch3.init()
         delay(1000*us)
 
-        self.urukul0_ch0.set(100*MHz)
+        self.urukul0_ch0.set(10*MHz)
         self.urukul0_ch0.sw.on()
         self.urukul0_ch0.set_att(10.)
 
-        self.urukul0_ch1.set(150 * MHz)
+        self.urukul0_ch1.set(15 * MHz)
         self.urukul0_ch1.sw.on()
         self.urukul0_ch1.set_att(10.)
 
-        self.urukul0_ch2.set(50 * MHz)
+        self.urukul0_ch2.set(5 * MHz)
         self.urukul0_ch2.sw.on()
         self.urukul0_ch2.set_att(10.)
 
-        self.urukul0_ch3.set(130 * MHz)
+        self.urukul0_ch3.set(13 * MHz)
         self.urukul0_ch3.sw.on()
         self.urukul0_ch3.set_att(10.)
 
     @kernel
     def sample(self, n, t):
-        self.core.reset()
+        # self.core.reset()
         self.core.break_realtime()
         self.sampler0.init()
         for i in range(7):

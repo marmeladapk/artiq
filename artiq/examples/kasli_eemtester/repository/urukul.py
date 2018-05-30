@@ -27,7 +27,7 @@ class UrukulTest(EnvExperiment):
         delay(1000*us)
         self.urukul0_ch0.set(10*MHz)
         self.urukul0_ch0.sw.on()
-        self.urukul0_ch0.set_att(10.)
+        self.urukul0_ch0.set_att(8.)
 
         delay(1000*us)
         self.urukul0_ch1.set(20*MHz, 0.5)
@@ -49,4 +49,4 @@ class UrukulTest(EnvExperiment):
         #         # self.ttl.pulse(100*ms)
         #         self.urukul0_ch0.sw.pulse(100*ms)
         #     delay(100*ms)
-            # self.led0.pulse(100*ms)
+        #     self.led0.pulse(100*ms)

@@ -403,19 +403,18 @@ class eemTester(_StandaloneBase):
 
         self.rtio_channels = rtio_channels = []
 
-        # EEM 0 and 1 - DIO RJ45
-        self.add_dio("eem0")
-        self.add_dio("eem1")
-        self.add_dio("eem4")
 
-        # EEM3, EEM2: Sampler
-        self.add_sampler("eem3", "eem2")
+        self.add_dio("eem3")
+        # self.add_dio("eem1")
+        # self.add_dio("eem5")
+        self.add_sampler("eem5", "eem4")
+        self.add_sampler("eem1", "eem0")
 
         # EEM5 + EEM4: Urukul
-        # self.add_urukul("eem5", "eem4")
+        self.add_urukul("eem7", "eem6")
 
         # EEM7: Zotino
-        # self.add_zotino("eem7")
+        self.add_zotino("eem2")
 
         for i in (1, 2):
             sfp_ctl = platform.request("sfp_ctl", i)
