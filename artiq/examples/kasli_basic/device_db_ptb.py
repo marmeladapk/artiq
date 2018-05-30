@@ -1,4 +1,4 @@
-core_addr = "kasli-2.lab.m-labs.hk"
+core_addr = "staging.ber.quartiq.de"
 
 device_db = {
     "core": {
@@ -38,152 +38,196 @@ device_db = {
     },
 }
 
-for i in range(24):
-    device_db["ttl" + str(i)] = {
+
+device_db.update({
+    "ttl" + str(i): {
         "type": "local",
         "module": "artiq.coredevice.ttl",
         "class": "TTLInOut" if i < 4 else "TTLOut",
         "arguments": {"channel": i},
-    }
+    } for i in range(24)
+})
 
-device_db.update(
-    spi_urukul0={
+
+device_db.update({
+    "spi_sampler0_adc": {
         "type": "local",
         "module": "artiq.coredevice.spi2",
         "class": "SPIMaster",
         "arguments": {"channel": 24}
     },
-    ttl_urukul0_io_update={
+    "spi_sampler0_pgia": {
         "type": "local",
-        "module": "artiq.coredevice.ttl",
-        "class": "TTLOut",
+        "module": "artiq.coredevice.spi2",
+        "class": "SPIMaster",
         "arguments": {"channel": 25}
     },
-    ttl_urukul0_sw0={
+    "spi_sampler0_cnv": {
         "type": "local",
         "module": "artiq.coredevice.ttl",
         "class": "TTLOut",
-        "arguments": {"channel": 26}
+        "arguments": {"channel": 26},
     },
-    ttl_urukul0_sw1={
+    "sampler0": {
         "type": "local",
-        "module": "artiq.coredevice.ttl",
-        "class": "TTLOut",
+        "module": "artiq.coredevice.sampler",
+        "class": "Sampler",
+        "arguments": {
+            "spi_adc_device": "spi_sampler0_adc",
+            "spi_pgia_device": "spi_sampler0_pgia",
+            "cnv_device": "spi_sampler0_cnv"
+        }
+    }
+})
+
+device_db.update({
+    "spi_urukul0": {
+        "type": "local",
+        "module": "artiq.coredevice.spi2",
+        "class": "SPIMaster",
         "arguments": {"channel": 27}
     },
-    ttl_urukul0_sw2={
+    "ttl_urukul0_io_update": {
         "type": "local",
         "module": "artiq.coredevice.ttl",
         "class": "TTLOut",
         "arguments": {"channel": 28}
     },
-    ttl_urukul0_sw3={
+    "ttl_urukul0_sw0": {
         "type": "local",
         "module": "artiq.coredevice.ttl",
         "class": "TTLOut",
         "arguments": {"channel": 29}
     },
-    urukul0_cpld={
+    "ttl_urukul0_sw1": {
+        "type": "local",
+        "module": "artiq.coredevice.ttl",
+        "class": "TTLOut",
+        "arguments": {"channel": 30}
+    },
+    "ttl_urukul0_sw2": {
+        "type": "local",
+        "module": "artiq.coredevice.ttl",
+        "class": "TTLOut",
+        "arguments": {"channel": 31}
+    },
+    "ttl_urukul0_sw3": {
+        "type": "local",
+        "module": "artiq.coredevice.ttl",
+        "class": "TTLOut",
+        "arguments": {"channel": 32}
+    },
+    "urukul0_cpld": {
         "type": "local",
         "module": "artiq.coredevice.urukul",
         "class": "CPLD",
         "arguments": {
             "spi_device": "spi_urukul0",
             "io_update_device": "ttl_urukul0_io_update",
-            "refclk": 125e6,
+            "refclk": 100e6,
             "clk_sel": 0
         }
     }
-)
+})
 
-for i in range(4):
-    device_db["urukul0_ch" + str(i)] = {
+device_db.update({
+    "urukul0_ch" + str(i): {
         "type": "local",
-        "module": "artiq.coredevice.ad9910",
-        "class": "AD9910",
+        "module": "artiq.coredevice.ad9912",
+        "class": "AD9912",
         "arguments": {
-            "pll_n": 32,
+            "pll_n": 10,
             "chip_select": 4 + i,
             "cpld_device": "urukul0_cpld",
             "sw_device": "ttl_urukul0_sw" + str(i)
         }
-    }
+    } for i in range(4)
+})
 
 
-device_db.update(
-    spi_urukul1={
+device_db.update({
+    "spi_urukul1": {
         "type": "local",
         "module": "artiq.coredevice.spi2",
         "class": "SPIMaster",
-        "arguments": {"channel": 30}
-    },
-    ttl_urukul1_io_update={
-        "type": "local",
-        "module": "artiq.coredevice.ttl",
-        "class": "TTLOut",
-        "arguments": {"channel": 31}
-    },
-    ttl_urukul1_sw0={
-        "type": "local",
-        "module": "artiq.coredevice.ttl",
-        "class": "TTLOut",
-        "arguments": {"channel": 32}
-    },
-    ttl_urukul1_sw1={
-        "type": "local",
-        "module": "artiq.coredevice.ttl",
-        "class": "TTLOut",
         "arguments": {"channel": 33}
     },
-    ttl_urukul1_sw2={
+    "ttl_urukul1_io_update": {
         "type": "local",
         "module": "artiq.coredevice.ttl",
         "class": "TTLOut",
         "arguments": {"channel": 34}
     },
-    ttl_urukul1_sw3={
-        "type": "local",
-        "module": "artiq.coredevice.ttl",
-        "class": "TTLOut",
-        "arguments": {"channel": 35}
-    },
-    urukul1_cpld={
+    "urukul1_cpld": {
         "type": "local",
         "module": "artiq.coredevice.urukul",
         "class": "CPLD",
         "arguments": {
             "spi_device": "spi_urukul1",
             "io_update_device": "ttl_urukul1_io_update",
-            "refclk": 125e6,
+            "refclk": 100e6,
             "clk_sel": 0
         }
     }
-)
+})
 
-for i in range(4):
-    device_db["urukul1_ch" + str(i)] = {
+device_db.update({
+    "urukul1_ch" + str(i): {
         "type": "local",
         "module": "artiq.coredevice.ad9910",
         "class": "AD9910",
         "arguments": {
-            "pll_n": 32,
+            "pll_n": 40,
             "chip_select": 4 + i,
-            "cpld_device": "urukul1_cpld",
-            "sw_device": "ttl_urukul1_sw" + str(i)
+            "cpld_device": "urukul1_cpld"
         }
-    }
+    } for i in range(4)
+})
 
-device_db.update(
-    led0={
+
+device_db.update({
+    "led0": {
+        "type": "local",
+        "module": "artiq.coredevice.ttl",
+        "class": "TTLOut",
+        "arguments": {"channel": 35}
+    },
+    "led1": {
+        "type": "local",
+        "module": "artiq.coredevice.ttl",
+        "class": "TTLOut",
+        "arguments": {"channel": 36}
+    }
+})
+
+
+device_db.update({
+    "spi_zotino0": {
+        "type": "local",
+        "module": "artiq.coredevice.spi2",
+        "class": "SPIMaster",
+        "arguments": {"channel": 37}
+    },
+    "ttl_zotino0_ldac": {
         "type": "local",
         "module": "artiq.coredevice.ttl",
         "class": "TTLOut",
         "arguments": {"channel": 38}
     },
-    led1={
+    "ttl_zotino0_clr": {
         "type": "local",
         "module": "artiq.coredevice.ttl",
         "class": "TTLOut",
         "arguments": {"channel": 39}
+    },
+    "zotino0": {
+        "type": "local",
+        "module": "artiq.coredevice.zotino",
+        "class": "Zotino",
+        "arguments": {
+            "spi_device": "spi_zotino0",
+            "ldac_device": "ttl_zotino0_ldac",
+            "clr_device": "ttl_zotino0_clr"
+        }
     }
-)
+})
