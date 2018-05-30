@@ -1083,36 +1083,9 @@ def main():
     soc_kasli_args(parser)
     parser.set_defaults(output_dir="artiq_kasli")
     variants = {cls.__name__.lower(): cls for cls in [
-        Opticlock, SUServo, SYSU, MITLL, USTC, PTB, HUB, LUH,
+        Opticlock, SUServo, SYSU, MITLL, USTC, PTB, HUB, LUH, eemtester
         Tester, Master, Satellite]}
     parser.add_argument("-V", "--variant", default="opticlock",
-<<<<<<< HEAD
-                        help="variant: opticlock/suservo/sysu/mitll/ustc/"
-                             "tester/master/satellite/eemtester "
-                             "(default: %(default)s)")
-    args = parser.parse_args()
-
-    variant = args.variant.lower()
-    if variant == "opticlock":
-        cls = Opticlock
-    elif variant == "suservo":
-        cls = SUServo
-    elif variant == "sysu":
-        cls = SYSU
-    elif variant == "mitll":
-        cls = MITLL
-    elif variant == "ustc":
-        cls = USTC
-    elif variant == "tester":
-        cls = Tester
-    elif variant == "master":
-        cls = Master
-    elif variant == "satellite":
-        cls = Satellite
-    elif variant == "eemtester":
-        cls = eemTester
-    else:
-=======
                         help="variant: {} (default: %(default)s)".format(
                             "/".join(sorted(variants.keys()))))
     args = parser.parse_args()
@@ -1121,7 +1094,6 @@ def main():
     try:
         cls = variants[variant]
     except KeyError:
->>>>>>> master
         raise SystemExit("Invalid variant (-V/--variant)")
 
     soc = cls(**soc_kasli_argdict(args))
