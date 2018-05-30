@@ -156,7 +156,6 @@ class eemTester(_StandaloneBase):
         _StandaloneBase.__init__(self, hw_rev=hw_rev, **kwargs)
 
         self.config["SI5324_AS_SYNTHESIZER"] = None
-        # self.config["SI5324_EXT_REF"] = None
         self.config["RTIO_FREQUENCY"] = "125.0"
 
         platform = self.platform
@@ -169,18 +168,24 @@ class eemTester(_StandaloneBase):
 
         self.rtio_channels = rtio_channels = []
 
-
-        self.add_dio("eem3")
-        # self.add_dio("eem1")
-        # self.add_dio("eem5")
-        self.add_sampler("eem5", "eem4")
-        self.add_sampler("eem1", "eem0")
+        eem.DIO.add_std(self, 3,
+                        ttl_serdes_7series.InOut_8X, ttl_serdes_7series.Output_8X)
+        # eem.DIO.add_std(self, 1,
+        #                 ttl_serdes_7series.InOut_8X, ttl_serdes_7series.Output_8X)
+        # eem.DIO.add_std(self, 5,
+        #                 ttl_serdes_7series.InOut_8X, ttl_serdes_7series.Output_8X)
+        eem.Sampler.add_std(self, 5, 4, ttl_serdes_7series.Output_8X)
+        eem.Sampler.add_std(self, 1, 0, ttl_serdes_7series.Output_8X)
+        # self.add_sampler("eem5", "eem4")
+        # self.add_sampler("eem1", "eem0")
 
         # EEM5 + EEM4: Urukul
-        self.add_urukul("eem7", "eem6")
+        eem.Urukul.add_std(self, 7, 6, ttl_serdes_7series.Output_8X)
+        # self.add_urukul("eem7", "eem6")
 
         # EEM7: Zotino
-        self.add_zotino("eem2")
+        eem.Zotino.add_std(self, 2, ttl_serdes_7series.Output_8X)
+        # self.add_zotino("eem2")
 
         for i in (1, 2):
             sfp_ctl = platform.request("sfp_ctl", i)
