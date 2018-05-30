@@ -1083,7 +1083,7 @@ def main():
     soc_kasli_args(parser)
     parser.set_defaults(output_dir="artiq_kasli")
     variants = {cls.__name__.lower(): cls for cls in [
-        Opticlock, SUServo, SYSU, MITLL, USTC, PTB, HUB, LUH, eemtester,
+        Opticlock, SUServo, SYSU, MITLL, USTC, PTB, HUB, LUH, eemTester,
         Tester, Master, Satellite]}
     parser.add_argument("-V", "--variant", default="opticlock",
                         help="variant: {} (default: %(default)s)".format(
