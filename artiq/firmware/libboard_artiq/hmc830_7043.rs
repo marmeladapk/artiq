@@ -343,19 +343,35 @@ pub mod hmc7043 {
         spi_setup();
         write(0x0111, analog_delay);
         write(0x0112, digital_delay);
+        clock::spin_us(100);
     }
 
     fn sysref_slip() {
         spi_setup();
         write(0x0002, 0x02);
         write(0x0002, 0x00);
+        clock::spin_us(100);
     }
 
     fn sysref_sample() -> bool {
         unsafe { csr::sysref_sampler::sample_result_read() == 1 }
     }
 
+    fn sysref_sysref_eye_scan() {
+        info!("SYSREF eye scan...");
+        
+        for phase in 0..136 {
+            sysref_offset_fpga(phase as u16);
+            let mut pts: [i32; 10] = [0; 10];
+            for pt in 0..10 {
+                pts[pt] = sysref_sample() as i32;
+            }
+            info!("{}: {:?}", phase, pts);
+        }
+    }
+
     pub fn sysref_rtio_align(phase_offset: u16, expected_align: u16) {
+        sysref_sysref_eye_scan();
         info!("aligning SYSREF with RTIO...");
 
         let mut slips0 = 0;
@@ -365,6 +381,14 @@ pub mod hmc7043 {
         // if we are already in the 1 zone, get out of it
         while sysref_sample() {
             sysref_slip();
+            info!("1: slip!");
+            sysref_sysref_eye_scan();
+            sysref_offset_fpga(phase_offset);
+            let mut pts: [i32; 10] = [0; 10];
+            for pt in 0..10 {
+                pts[pt] = sysref_sample() as i32;
+            }
+            info!("{}: {:?}", phase_offset, pts);
             slips0 += 1;
             if slips0 > 1024 {
                 error!("  failed to reach 1->0 transition");
@@ -374,6 +398,14 @@ pub mod hmc7043 {
         // get to the edge of the 0->1 transition (our final setpoint)
         while !sysref_sample() {
             sysref_slip();
+            info!("0: slip!");
+            sysref_sysref_eye_scan();
+            sysref_offset_fpga(phase_offset);
+            let mut pts: [i32; 10] = [0; 10];
+            for pt in 0..10 {
+                pts[pt] = sysref_sample() as i32;
+            }
+            info!("{}: {:?}", phase_offset, pts);
             slips1 += 1;
             if slips1 > 1024 {
                 error!("  failed to reach 0->1 transition");
@@ -393,6 +425,7 @@ pub mod hmc7043 {
                 break;
             }
         }
+        sysref_sysref_eye_scan();
         // meet setup/hold
         sysref_offset_fpga(phase_offset);
 
