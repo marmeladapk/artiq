@@ -3,12 +3,56 @@
 Release notes
 =============
 
+ARTIQ-5
+-------
+
+5.0
+***
+
+* The :class:`~artiq.coredevice.ad9910.AD9910` and
+  :class:`~artiq.coredevice.ad9914.AD9914` phase reference timestamp parameters
+  have been renamed to ``ref_time_mu`` for consistency, as they are in machine
+  units.
+* :func:`~artiq.tools.verbosity_args` renamed to :func:`~artiq.tools.add_common_args`. New feature: adds an option to print the ARTIQ version.
+* A gateware-level input edge counter has been added, which offers higher
+  throughput and increased flexibility over the usual TTL input PHYs where
+  edge timestamps are not required. See :mod:`artiq.coredevice.edge_counter` for
+  the core device driver and :mod:`artiq.gateware.rtio.phy.edge_counter`/
+  :meth:`artiq.gateware.eem.DIO.add_std` for the gateware components.
+
+
 ARTIQ-4
 -------
 
 4.0
 ***
 
+* The ``artiq.coredevice.ttl`` drivers no longer track the timestamps of
+  submitted events in software, requiring the user to explicitly specify the
+  timeout for ``count()``/``timestamp_mu()``. Support for ``sync()`` has been dropped.
+
+  Now that RTIO has gained DMA support, there is no longer a reliable way for
+  the kernel CPU to track the individual events submitted on any one channel.
+  Requiring the timeouts to be specified explicitly ensures consistent API
+  behavior. To make this more convenient, the ``TTLInOut.gate_*()`` functions
+  now return the cursor position at the end of the gate, e.g.::
+
+    ttl_input.count(ttl_input.gate_rising(100 * us))
+
+  In most situations – that is, unless the timeline cursor is rewound after the
+  respective ``gate_*()`` call – simply passing ``now_mu()`` is also a valid
+  upgrade path::
+
+    ttl_input.count(now_mu())
+
+  The latter might use up more timeline slack than necessary, though.
+
+  In place of ``TTL(In)Out.sync``, the new ``Core.wait_until_mu()`` method can
+  be used, which blocks execution until the hardware RTIO cursor reaches the
+  given timestamp::
+
+    ttl_output.pulse(10 * us)
+    self.core.wait_until_mu(now_mu())
 * RTIO outputs use a new architecture called Scalable Event Dispatcher (SED),
   which allows building systems with large number of RTIO channels more
   efficiently.
@@ -21,11 +65,13 @@ ARTIQ-4
   server address argument and the notify port.
 * The master now has a ``--name`` argument. If given, the dashboard is labelled
   with this name rather than the server address.
+* ``artiq_flash`` targets Kasli by default. Use ``-t kc705`` to flash a KC705
+  instead.
 * ``artiq_flash -m/--adapter`` has been changed to ``artiq_flash -V/--variant``.
 * The ``proxy`` action of ``artiq_flash`` is determined automatically and should
   not be specified manually anymore.
 * ``kc705_dds`` has been renamed ``kc705``.
-* the ``-H/--hw-adapter`` option of ``kc705`` has ben renamed ``-V/--variant``.
+* The ``-H/--hw-adapter`` option of ``kc705`` has been renamed ``-V/--variant``.
 * SPI masters have been switched from misoc-spi to misoc-spi2. This affects
   all out-of-tree RTIO core device drivers using those buses. See the various
   commits on e.g. the ``ad53xx`` driver for an example how to port from the old
@@ -37,10 +83,23 @@ ARTIQ-4
   is no longer necessary.
 * The configuration entry ``startup_clock`` is renamed ``rtio_clock``. Switching
   clocks dynamically (i.e. without device restart) is no longer supported.
+* ``set_dataset(..., save=True)`` has been renamed
+  ``set_dataset(..., archive=True)``.
+* On the AD9914 DDS, when switching to ``PHASE_MODE_CONTINUOUS`` from another mode,
+  use the returned value of the last ``set_mu`` call as the phase offset for
+  ``PHASE_MODE_CONTINUOUS`` to avoid a phase discontinuity. This is no longer done
+  automatically. If one phase glitch when entering ``PHASE_MODE_CONTINUOUS`` is not
+  an issue, this recommendation can be ignored.
 
 
 ARTIQ-3
 -------
+
+3.7
+***
+
+No further notes.
+
 
 3.6
 ***

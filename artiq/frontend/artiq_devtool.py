@@ -16,7 +16,7 @@ import shutil
 import re
 import shlex
 
-from artiq.tools import verbosity_args, init_logger
+from artiq.tools import add_common_args, init_logger
 from artiq.remoting import SSHClient
 from artiq.coredevice.comm_mgmt import CommMgmt
 
@@ -28,10 +28,10 @@ def get_argparser():
         description="ARTIQ core device development tool",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    verbosity_args(parser)
+    add_common_args(parser)
 
     parser.add_argument("-t", "--target", metavar="TARGET",
-                        type=str, default="kc705",
+                        type=str, default="kasli",
                         help="target to build, one of: "
                              "kc705 kasli sayma")
     parser.add_argument("-V", "--variant", metavar="VARIANT",
@@ -91,7 +91,7 @@ def main():
         variant = "standalone" if args.variant is None else args.variant
     elif args.target == "kasli":
         board_type, firmware = "kasli", "runtime"
-        variant = "opticlock" if args.variant is None else args.variant
+        variant = "tester" if args.variant is None else args.variant
     else:
         raise NotImplementedError("unknown target {}".format(args.target))
 

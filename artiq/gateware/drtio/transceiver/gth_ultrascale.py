@@ -14,7 +14,7 @@ from artiq.gateware.drtio.transceiver.gth_ultrascale_init import *
 
 
 class GTHSingle(Module):
-    def __init__(self, refclk, pads, sys_clk_freq, rtio_clk_freq, dw, mode):
+    def __init__(self, refclk, pads, sys_clk_freq, rtio_clk_freq, rtiox_mul, dw, mode):
         assert (dw == 20) or (dw == 40)
         assert mode in ["single", "master", "slave"]
         self.mode = mode
@@ -441,7 +441,7 @@ class GTHSingle(Module):
             p_TX_PMADATA_OPT                 =0b0,
             p_TX_PMA_POWER_SAVE              =0b0,
             p_TX_PROGCLK_SEL                 ="PREPI",
-            p_TX_PROGDIV_CFG                 =0.0,
+            p_TX_PROGDIV_CFG                 =dw/rtiox_mul,
             p_TX_QPI_STATUS_EN               =0b0,
             p_TX_RXDETECT_CFG                =0b00000000110010,
             p_TX_RXDETECT_REF                =0b100,
@@ -469,7 +469,7 @@ class GTHSingle(Module):
             o_TXOUTCLK=self.txoutclk,
             i_TXSYSCLKSEL=0b00,
             i_TXPLLCLKSEL=0b00,
-            i_TXOUTCLKSEL=0b11,
+            i_TXOUTCLKSEL=0b101,
 
             # TX Startup/Reset
             i_GTTXRESET=tx_init.gtXxreset,
@@ -558,9 +558,12 @@ class GTHSingle(Module):
         tx_reset_deglitched.attr.add("no_retiming")
         self.sync += tx_reset_deglitched.eq(~tx_init.done)
         self.clock_domains.cd_rtio_tx = ClockDomain()
+        self.clock_domains.cd_rtiox_tx = ClockDomain()
         if mode == "master" or mode == "single":
-            self.specials += \
-                Instance("BUFG_GT", i_I=self.txoutclk, o_O=self.cd_rtio_tx.clk, i_DIV=0)
+            self.specials += [
+                Instance("BUFG_GT", i_I=self.txoutclk, o_O=self.cd_rtiox_tx.clk, i_DIV=0),
+                Instance("BUFG_GT", i_I=self.txoutclk, o_O=self.cd_rtio_tx.clk, i_DIV=rtiox_mul-1)
+            ]
         self.specials += AsyncResetSynchronizer(self.cd_rtio_tx, tx_reset_deglitched)
 
         # rx clocking
@@ -630,18 +633,23 @@ class GTHTXPhaseAlignement(Module):
 
 
 class GTH(Module, TransceiverInterface):
-    def __init__(self, clock_pads, data_pads, sys_clk_freq, rtio_clk_freq, dw=20, master=0):
+    def __init__(self, clock_pads, data_pads, sys_clk_freq, rtio_clk_freq, rtiox_mul=2, dw=20, master=0):
         self.nchannels = nchannels = len(data_pads)
         self.gths = []
 
         # # #
 
-        refclk = Signal()
-        self.specials += Instance("IBUFDS_GTE3",
-            i_CEB=0,
-            i_I=clock_pads.p,
-            i_IB=clock_pads.n,
-            o_O=refclk)
+        create_buf = hasattr(clock_pads, "p")
+        if create_buf:
+            refclk = Signal()
+            ibufds_ceb = Signal()
+            self.specials += Instance("IBUFDS_GTE3",
+                i_CEB=ibufds_ceb,
+                i_I=clock_pads.p,
+                i_IB=clock_pads.n,
+                o_O=refclk)
+        else:
+            refclk = clock_pads
 
         rtio_tx_clk = Signal()
         channel_interfaces = []
@@ -650,7 +658,7 @@ class GTH(Module, TransceiverInterface):
                 mode = "single"
             else:
                 mode = "master" if i == master else "slave"
-            gth = GTHSingle(refclk, data_pads[i], sys_clk_freq, rtio_clk_freq, dw, mode)
+            gth = GTHSingle(refclk, data_pads[i], sys_clk_freq, rtio_clk_freq, rtiox_mul, dw, mode)
             if mode == "master":
                 self.comb += rtio_tx_clk.eq(gth.cd_rtio_tx.clk)
             elif mode == "slave":
@@ -664,11 +672,16 @@ class GTH(Module, TransceiverInterface):
         self.submodules.tx_phase_alignment = GTHTXPhaseAlignement(self.gths)
 
         TransceiverInterface.__init__(self, channel_interfaces)
-        # GTH PLLs recover on their own from an interrupted clock input.
-        # stable_clkin can be ignored.
+        self.clock_domains.cd_rtiox = ClockDomain(reset_less=True)
+        if create_buf:
+            # GTH PLLs recover on their own from an interrupted clock input,
+            # but be paranoid about HMC7043 noise.
+            self.stable_clkin.storage.attr.add("no_retiming")
+            self.comb += ibufds_ceb.eq(~self.stable_clkin.storage)
 
         self.comb += [
             self.cd_rtio.clk.eq(self.gths[master].cd_rtio_tx.clk),
+            self.cd_rtiox.clk.eq(self.gths[master].cd_rtiox_tx.clk),
             self.cd_rtio.rst.eq(reduce(or_, [gth.cd_rtio_tx.rst for gth in self.gths]))
         ]
         for i in range(nchannels):

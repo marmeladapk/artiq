@@ -29,6 +29,23 @@ class RTIOCounter(EnvExperiment):
         self.set_dataset("dt", self.core.mu_to_seconds(t1 - t0))
 
 
+class InvalidCounter(Exception):
+    pass
+
+
+class WaitForRTIOCounter(EnvExperiment):
+    def build(self):
+        self.setattr_device("core")
+
+    @kernel
+    def run(self):
+        self.core.break_realtime()
+        target_mu = now_mu() + 10000
+        self.core.wait_until_mu(target_mu)
+        if self.core.get_rtio_counter_mu() < target_mu:
+            raise InvalidCounter
+
+
 class PulseNotReceived(Exception):
     pass
 
@@ -51,7 +68,7 @@ class RTT(EnvExperiment):
                 delay(1*us)
                 t0 = now_mu()
                 self.ttl_inout.pulse(1*us)
-        t1 = self.ttl_inout.timestamp_mu()
+        t1 = self.ttl_inout.timestamp_mu(now_mu())
         if t1 < 0:
             raise PulseNotReceived()
         self.set_dataset("rtt", self.core.mu_to_seconds(t1 - t0))
@@ -75,7 +92,7 @@ class Loopback(EnvExperiment):
                 delay(1*us)
                 t0 = now_mu()
                 self.loop_out.pulse(1*us)
-        t1 = self.loop_in.timestamp_mu()
+        t1 = self.loop_in.timestamp_mu(now_mu())
         if t1 < 0:
             raise PulseNotReceived()
         self.set_dataset("rtt", self.core.mu_to_seconds(t1 - t0))
@@ -92,13 +109,13 @@ class ClockGeneratorLoopback(EnvExperiment):
         self.core.reset()
         self.loop_clock_in.input()
         self.loop_clock_out.stop()
-        delay(20*us)
+        delay(200*us)
         with parallel:
             self.loop_clock_in.gate_rising(10*us)
             with sequential:
                 delay(200*ns)
                 self.loop_clock_out.set(1*MHz)
-        self.set_dataset("count", self.loop_clock_in.count())
+        self.set_dataset("count", self.loop_clock_in.count(now_mu()))
 
 
 class PulseRate(EnvExperiment):
@@ -124,25 +141,25 @@ class PulseRate(EnvExperiment):
                 return
 
 
-class PulseRateDDS(EnvExperiment):
+class PulseRateAD9914DDS(EnvExperiment):
     def build(self):
         self.setattr_device("core")
-        self.setattr_device("dds0")
-        self.setattr_device("dds1")
+        self.setattr_device("ad9914dds0")
+        self.setattr_device("ad9914dds1")
 
     @kernel
     def run(self):
         self.core.reset()
         dt = self.core.seconds_to_mu(5*us)
-        freq = self.dds0.frequency_to_ftw(100*MHz)
+        freq = self.ad9914dds0.frequency_to_ftw(100*MHz)
         while True:
             delay(10*ms)
             for i in range(1250):
                 try:
-                    delay_mu(-self.dds0.set_duration_mu)
-                    self.dds0.set_mu(freq)
-                    delay_mu(self.dds0.set_duration_mu)
-                    self.dds1.set_mu(freq)
+                    delay_mu(-self.ad9914dds0.set_duration_mu)
+                    self.ad9914dds0.set_mu(freq)
+                    delay_mu(self.ad9914dds0.set_duration_mu)
+                    self.ad9914dds1.set_mu(freq)
                     delay_mu(dt)
                 except RTIOUnderflow:
                     dt += 100
@@ -186,7 +203,68 @@ class LoopbackCount(EnvExperiment):
                 for i in range(self.npulses):
                     delay(25*ns)
                     self.loop_out.pulse(25*ns)
-        self.set_dataset("count", self.loop_in.count())
+        self.set_dataset("count", self.loop_in.count(now_mu()))
+
+
+class IncorrectPulseTiming(Exception):
+    pass
+
+
+class LoopbackGateTiming(EnvExperiment):
+    def build(self):
+        self.setattr_device("core")
+        self.setattr_device("loop_in")
+        self.setattr_device("loop_out")
+
+    @kernel
+    def run(self):
+        # Make sure there are no leftover events.
+        self.core.reset()
+        self.loop_in.input()
+        self.loop_out.output()
+        delay_mu(500)
+        self.loop_out.off()
+        delay_mu(5000)
+
+        # Determine loop delay.
+        with parallel:
+            self.loop_in.gate_rising_mu(10000)
+            with sequential:
+                delay_mu(5000)
+                out_mu = now_mu()
+                self.loop_out.pulse_mu(1000)
+        in_mu = self.loop_in.timestamp_mu(now_mu())
+        if in_mu < 0:
+            raise PulseNotReceived("Cannot determine loop delay")
+        loop_delay_mu = in_mu - out_mu
+
+        # With the exact delay known, make sure tight gate timings work.
+        # In the most common configuration, 24 mu == 24 ns == 3 coarse periods,
+        # which should be plenty of slack.
+        delay_mu(10000)
+
+        gate_start_mu = now_mu()
+        self.loop_in.gate_both_mu(24)
+        gate_end_mu = now_mu()
+
+        # gateware latency offset between gate and input
+        lat_offset = 11*8
+        out_mu = gate_start_mu - loop_delay_mu + lat_offset
+        at_mu(out_mu)
+        self.loop_out.pulse_mu(24)
+
+        in_mu = self.loop_in.timestamp_mu(gate_end_mu)
+        print("timings: ", gate_start_mu, in_mu - lat_offset, gate_end_mu)
+        if in_mu < 0:
+            raise PulseNotReceived()
+        if not (gate_start_mu <= (in_mu - lat_offset) <= gate_end_mu):
+            raise IncorrectPulseTiming("Input event should occur during gate")
+        if not (-2 < (in_mu - out_mu - loop_delay_mu) < 2):
+            raise IncorrectPulseTiming("Loop delay should not change")
+
+        in_mu = self.loop_in.timestamp_mu(gate_end_mu)
+        if in_mu > 0:
+            raise IncorrectPulseTiming("Only one pulse should be received")
 
 
 class IncorrectLevel(Exception):
@@ -375,12 +453,16 @@ class CoredeviceTest(ExperimentCase):
         self.assertGreater(dt, 50*ns)
         self.assertLess(dt, 1*us)
 
+    def test_wait_for_rtio_counter(self):
+        self.execute(WaitForRTIOCounter)
+
     def test_loopback(self):
         self.execute(Loopback)
         rtt = self.dataset_mgr.get("rtt")
         print(rtt)
-        self.assertGreater(rtt, 0*ns)
-        self.assertLess(rtt, 140*ns)
+        self.assertGreater(rtt, 20*ns)
+        # on Kasli systems, this has to go through the isolated DIO card
+        self.assertLess(rtt, 170*ns)
 
     def test_clock_generator_loopback(self):
         self.execute(ClockGeneratorLoopback)
@@ -393,11 +475,11 @@ class CoredeviceTest(ExperimentCase):
         rate = self.dataset_mgr.get("pulse_rate")
         print(rate)
         self.assertGreater(rate, 100*ns)
-        self.assertLess(rate, 700*ns)
+        self.assertLess(rate, 480*ns)
 
-    def test_pulse_rate_dds(self):
-        """Minimum interval for sustained DDS frequency switching"""
-        self.execute(PulseRateDDS)
+    def test_pulse_rate_ad9914_dds(self):
+        """Minimum interval for sustained AD9914 DDS frequency switching"""
+        self.execute(PulseRateAD9914DDS)
         rate = self.dataset_mgr.get("pulse_rate")
         print(rate)
         self.assertGreater(rate, 1*us)
@@ -408,6 +490,9 @@ class CoredeviceTest(ExperimentCase):
         self.execute(LoopbackCount, npulses=npulses)
         count = self.dataset_mgr.get("count")
         self.assertEqual(count, npulses)
+
+    def test_loopback_gate_timing(self):
+        self.execute(LoopbackGateTiming)
 
     def test_level(self):
         self.execute(Level)
@@ -641,9 +726,15 @@ class DMATest(ExperimentCase):
         exp.record_many(count)
         dt = self.dataset_mgr.get("dma_record_time")
         print("dt={}, dt/count={}".format(dt, dt/count))
-        self.assertLess(dt/count, 20*us)
+        self.assertLess(dt/count, 11*us)
 
     def test_dma_playback_time(self):
+        # Skip on Kasli until #946 is resolved.
+        try:
+            # hack to detect Kasli.
+            self.device_mgr.get_desc("ad9914dds0")
+        except KeyError:
+            raise unittest.SkipTest("skipped on Kasli for now")
         exp = self.create(_DMA)
         count = 20000
         exp.record_many(40)

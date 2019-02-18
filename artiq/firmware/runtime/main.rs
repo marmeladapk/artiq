@@ -1,7 +1,9 @@
-#![feature(lang_items, alloc, global_allocator, try_from, nonzero, nll, needs_panic_runtime, asm)]
+#![feature(lang_items, alloc, try_from, nonzero, asm,
+           panic_implementation, panic_info_message,
+           const_slice_len)]
 #![no_std]
-#![needs_panic_runtime]
 
+extern crate eh;
 #[macro_use]
 extern crate alloc;
 extern crate failure;
@@ -24,6 +26,7 @@ extern crate board_artiq;
 extern crate logger_artiq;
 extern crate proto_artiq;
 
+use core::cell::RefCell;
 use core::convert::TryFrom;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 
@@ -32,12 +35,12 @@ use board_misoc::{csr, irq, ident, clock, boot, config};
 use board_misoc::ethmac;
 #[cfg(has_drtio)]
 use board_artiq::drtioaux;
+use board_artiq::drtio_routing;
 use board_artiq::{mailbox, rpc_queue};
-use proto_artiq::{mgmt_proto, moninj_proto, rpc_proto, session_proto,kernel_proto};
+use proto_artiq::{mgmt_proto, moninj_proto, rpc_proto, session_proto, kernel_proto};
 #[cfg(has_rtio_analyzer)]
 use proto_artiq::analyzer_proto;
 
-#[cfg(has_rtio_core)]
 mod rtio_mgt;
 
 mod urc;
@@ -61,8 +64,8 @@ fn startup() {
     irq::set_ie(true);
     clock::init();
     info!("ARTIQ runtime starting...");
-    info!("software version {}", include_str!(concat!(env!("OUT_DIR"), "/git-describe")));
-    info!("gateware version {}", ident::read(&mut [0; 64]));
+    info!("software ident {}", csr::CONFIG_IDENTIFIER_STR);
+    info!("gateware ident {}", ident::read(&mut [0; 64]));
 
     match config::read_str("log_level", |r| r.map(|s| s.parse())) {
         Ok(Ok(log_level_filter)) => {
@@ -82,7 +85,7 @@ fn startup() {
         _ => info!("UART log level set to INFO by default")
     }
 
-    #[cfg(has_slave_fpga)]
+    #[cfg(has_slave_fpga_cfg)]
     board_artiq::slave_fpga::load().expect("cannot load RTM FPGA gateware");
     #[cfg(has_serwb_phy_amc)]
     board_artiq::serwb::wait_init();
@@ -109,7 +112,16 @@ fn startup() {
     /* must be the first SPI init because of HMC830 SPI mode selection */
     board_artiq::hmc830_7043::init().expect("cannot initialize HMC830/7043");
     #[cfg(has_ad9154)]
-    board_artiq::ad9154::init().expect("cannot initialize AD9154");
+    {
+        board_artiq::ad9154::jesd_reset(false);
+        board_artiq::ad9154::init();
+        if let Err(e) = board_artiq::jesd204sync::sysref_auto_rtio_align() {
+            error!("failed to align SYSREF at FPGA: {}", e);
+        }
+        if let Err(e) = board_artiq::jesd204sync::sysref_auto_dac_align() {
+            error!("failed to align SYSREF at DAC: {}", e);
+        }
+    }
     #[cfg(has_allaki_atts)]
     board_artiq::hmc542::program_all(8/*=4dB*/);
 
@@ -126,7 +138,7 @@ fn startup() {
 fn setup_si5324_as_synthesizer()
 {
     // 125MHz output, from 100MHz CLKIN2 reference, 586 Hz
-    #[cfg(all(rtio_frequency = "125.0", si5324_ext_ref))]
+    #[cfg(all(not(si5324_sayma_ref), rtio_frequency = "125.0", si5324_ext_ref))]
     const SI5324_SETTINGS: board_artiq::si5324::FrequencySettings
         = board_artiq::si5324::FrequencySettings {
         n1_hs  : 10,
@@ -139,7 +151,7 @@ fn setup_si5324_as_synthesizer()
         crystal_ref: false
     };
     // 125MHz output, from crystal, 7 Hz
-    #[cfg(all(rtio_frequency = "125.0", not(si5324_ext_ref)))]
+    #[cfg(all(not(si5324_sayma_ref), rtio_frequency = "125.0", not(si5324_ext_ref)))]
     const SI5324_SETTINGS: board_artiq::si5324::FrequencySettings
         = board_artiq::si5324::FrequencySettings {
         n1_hs  : 10,
@@ -152,11 +164,24 @@ fn setup_si5324_as_synthesizer()
         crystal_ref: true
     };
     // 150MHz output, from crystal
-    #[cfg(all(rtio_frequency = "150.0", not(si5324_ext_ref)))]
+    #[cfg(all(not(si5324_sayma_ref), rtio_frequency = "150.0", not(si5324_ext_ref)))]
     const SI5324_SETTINGS: board_artiq::si5324::FrequencySettings
         = board_artiq::si5324::FrequencySettings {
         n1_hs  : 9,
         nc1_ls : 4,
+        n2_hs  : 10,
+        n2_ls  : 33732,
+        n31    : 9370,
+        n32    : 7139,
+        bwsel  : 3,
+        crystal_ref: true
+    };
+    // 100MHz output, from crystal. Also used as reference for Sayma HMC830.
+    #[cfg(any(si5324_sayma_ref, all(rtio_frequency = "100.0", not(si5324_ext_ref))))]
+    const SI5324_SETTINGS: board_artiq::si5324::FrequencySettings
+        = board_artiq::si5324::FrequencySettings {
+        n1_hs  : 9,
+        nc1_ls : 6,
         n2_hs  : 10,
         n2_ls  : 33732,
         n31    : 9370,
@@ -185,7 +210,18 @@ fn startup_ethernet() {
             info!("using MAC address {}", hardware_addr);
         }
         _ => {
-            hardware_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+            #[cfg(soc_platform = "kasli")]
+            {
+                hardware_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x21]);
+            }
+            #[cfg(soc_platform = "sayma_amc")]
+            {
+                hardware_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x11]);
+            }
+            #[cfg(soc_platform = "kc705")]
+            {
+                hardware_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+            }
             warn!("using default MAC address {}; consider changing it", hardware_addr);
         }
     }
@@ -197,7 +233,18 @@ fn startup_ethernet() {
             info!("using IP address {}", protocol_addr);
         }
         _ => {
-            protocol_addr = IpAddress::v4(192, 168, 1, 50);
+            #[cfg(soc_platform = "kasli")]
+            {
+                protocol_addr = IpAddress::v4(192, 168, 1, 70);
+            }
+            #[cfg(soc_platform = "sayma_amc")]
+            {
+                protocol_addr = IpAddress::v4(192, 168, 1, 60);
+            }
+            #[cfg(soc_platform = "kc705")]
+            {
+                protocol_addr = IpAddress::v4(192, 168, 1, 50);
+            }
             info!("using default IP address {}", protocol_addr);
         }
     }
@@ -206,18 +253,18 @@ fn startup_ethernet() {
     net_device.reset_phy_if_any();
 
     let net_device = {
+        use smoltcp::time::Instant;
         use smoltcp::wire::PrettyPrinter;
         use smoltcp::wire::EthernetFrame;
 
-        fn net_trace_writer(timestamp: u64, printer: PrettyPrinter<EthernetFrame<&[u8]>>) {
-            let seconds = timestamp / 1000;
-            let micros  = timestamp % 1000 * 1000;
-            print!("\x1b[37m[{:6}.{:06}s]\n{}\x1b[0m\n", seconds, micros, printer)
+        fn net_trace_writer(timestamp: Instant, printer: PrettyPrinter<EthernetFrame<&[u8]>>) {
+            print!("\x1b[37m[{:6}.{:03}s]\n{}\x1b[0m\n",
+                   timestamp.secs(), timestamp.millis(), printer)
         }
 
-        fn net_trace_silent(_timestamp: u64, _printer: PrettyPrinter<EthernetFrame<&[u8]>>) {}
+        fn net_trace_silent(_timestamp: Instant, _printer: PrettyPrinter<EthernetFrame<&[u8]>>) {}
 
-        let net_trace_fn: fn(u64, PrettyPrinter<EthernetFrame<&[u8]>>);
+        let net_trace_fn: fn(Instant, PrettyPrinter<EthernetFrame<&[u8]>>);
         match config::read_str("net_trace", |r| r.map(|s| s == "1")) {
             Ok(true) => net_trace_fn = net_trace_writer,
             _ => net_trace_fn = net_trace_silent
@@ -225,9 +272,8 @@ fn startup_ethernet() {
         smoltcp::phy::EthernetTracer::new(net_device, net_trace_fn)
     };
 
-    let mut neighbor_map = [None; 8];
     let neighbor_cache =
-        smoltcp::iface::NeighborCache::new(&mut neighbor_map[..]);
+        smoltcp::iface::NeighborCache::new(alloc::btree_map::BTreeMap::new());
     let mut interface  =
         smoltcp::iface::EthernetInterfaceBuilder::new(net_device)
                        .neighbor_cache(neighbor_cache)
@@ -235,16 +281,39 @@ fn startup_ethernet() {
                        .ip_addrs([IpCidr::new(protocol_addr, 0)])
                        .finalize();
 
+    #[cfg(has_drtio)]
+    let drtio_routing_table = urc::Urc::new(RefCell::new(
+        drtio_routing::config_routing_table(csr::DRTIO.len())));
+    #[cfg(not(has_drtio))]
+    let drtio_routing_table = urc::Urc::new(RefCell::new(
+        drtio_routing::RoutingTable::default_empty()));
+    let up_destinations = urc::Urc::new(RefCell::new(
+        [false; drtio_routing::DEST_COUNT]));
+    #[cfg(has_drtio_routing)]
+    drtio_routing::interconnect_disable_all();
+    let aux_mutex = sched::Mutex::new();
+
     let mut scheduler = sched::Scheduler::new();
     let io = scheduler.io();
-    #[cfg(has_rtio_core)]
-    rtio_mgt::startup(&io);
+
+    rtio_mgt::startup(&io, &aux_mutex, &drtio_routing_table, &up_destinations);
+
     io.spawn(4096, mgmt::thread);
-    io.spawn(16384, session::thread);
+    {
+        let aux_mutex = aux_mutex.clone();
+        let drtio_routing_table = drtio_routing_table.clone();
+        let up_destinations = up_destinations.clone();
+        io.spawn(16384, move |io| { session::thread(io, &aux_mutex, &drtio_routing_table, &up_destinations) });
+    }
     #[cfg(any(has_rtio_moninj, has_drtio))]
-    io.spawn(4096, moninj::thread);
+    {
+        let aux_mutex = aux_mutex.clone();
+        let drtio_routing_table = drtio_routing_table.clone();
+        io.spawn(4096, move |io| { moninj::thread(io, &aux_mutex, &drtio_routing_table) });
+    }
     #[cfg(has_rtio_analyzer)]
     io.spawn(4096, analyzer::thread);
+
     #[cfg(has_grabber)]
     io.spawn(4096, grabber_thread);
 
@@ -255,7 +324,8 @@ fn startup_ethernet() {
         {
             let sockets = &mut *scheduler.sockets().borrow_mut();
             loop {
-                match interface.poll(sockets, clock::get_ms()) {
+                let timestamp = smoltcp::time::Instant::from_millis(clock::get_ms() as i64);
+                match interface.poll(sockets, timestamp) {
                     Ok(true) => (),
                     Ok(false) => break,
                     Err(smoltcp::Error::Unrecognized) => (),
@@ -329,16 +399,29 @@ pub extern fn abort() {
     loop {}
 }
 
-#[no_mangle]
-#[lang = "panic_fmt"]
-pub extern fn panic_fmt(args: core::fmt::Arguments, file: &'static str,
-                        line: u32, column: u32) -> ! {
+#[no_mangle] // https://github.com/rust-lang/rust/issues/{38281,51647}
+#[lang = "oom"] // https://github.com/rust-lang/rust/issues/51540
+pub fn oom(layout: core::alloc::Layout) -> ! {
+    panic!("heap view: {}\ncannot allocate layout: {:?}", unsafe { &ALLOC }, layout)
+}
+
+#[no_mangle] // https://github.com/rust-lang/rust/issues/{38281,51647}
+#[panic_implementation]
+pub fn panic_impl(info: &core::panic::PanicInfo) -> ! {
     irq::set_ie(false);
 
-    println!("panic at {}:{}:{}: {}", file, line, column, args);
+    if let Some(location) = info.location() {
+        print!("panic at {}:{}:{}", location.file(), location.line(), location.column());
+    } else {
+        print!("panic at unknown location");
+    }
+    if let Some(message) = info.message() {
+        println!("{}", message);
+    } else {
+        println!("");
+    }
 
-    println!("backtrace for software version {}:",
-             include_str!(concat!(env!("OUT_DIR"), "/git-describe")));
+    println!("backtrace for software version {}:", csr::CONFIG_IDENTIFIER_STR);
     let _ = unwind_backtrace::backtrace(|ip| {
         // Backtrace gives us the return address, i.e. the address after the delay slot,
         // but we're interested in the call instruction.

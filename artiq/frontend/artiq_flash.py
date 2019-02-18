@@ -11,7 +11,7 @@ from functools import partial
 from collections import defaultdict
 
 from artiq import __artiq_dir__ as artiq_dir
-from artiq.tools import verbosity_args, init_logger
+from artiq.tools import add_common_args, init_logger
 from artiq.remoting import SSHClient, LocalClient
 from artiq.frontend.bit2bin import bit2bin
 
@@ -28,6 +28,7 @@ Valid actions:
     * storage: write storage image to flash
     * firmware: write firmware to flash
     * load: load gateware bitstream into device (volatile but fast)
+    * erase: erase flash memory
     * start: trigger the target to (re)load its gateware bitstream from flash
 
 Prerequisites:
@@ -40,7 +41,7 @@ Prerequisites:
       plugdev group: 'sudo adduser $USER plugdev' and re-login.
 """)
 
-    verbosity_args(parser)
+    add_common_args(parser)
 
     parser.add_argument("-n", "--dry-run",
                         default=False, action="store_true",
@@ -51,9 +52,9 @@ Prerequisites:
     parser.add_argument("-J", "--jump",
                         type=str, default=None,
                         help="SSH host to jump through")
-    parser.add_argument("-t", "--target", default="kc705",
+    parser.add_argument("-t", "--target", default="kasli",
                         help="target board, default: %(default)s, one of: "
-                             "kc705 kasli sayma")
+                             "kasli sayma kc705")
     parser.add_argument("-V", "--variant", default=None,
                         help="board variant")
     parser.add_argument("-I", "--preinit-command", default=[], action="append",
@@ -131,6 +132,13 @@ class Programmer:
             "target create {tap}.{name}.proxy testee -chain-position {tap}.tap",
             "flash bank {name} jtagspi 0 0 0 0 {tap}.{name}.proxy {ir:#x}",
             tap=tap, name=name, ir=0x02 + index)
+
+    def erase_flash(self, bankname):
+        self.load_proxy()
+        add_commands(self._script,
+                     "flash probe {bankname}",
+                     "flash erase_sector {bankname} 0 last",
+                     bankname=bankname)
 
     def load(self, bitfile, pld):
         os.stat(bitfile) # check for existence
@@ -258,14 +266,6 @@ def main():
     init_logger(args)
 
     config = {
-        "kc705": {
-            "programmer":   partial(ProgrammerXC7, board="kc705", proxy="bscan_spi_xc7k325t.bit"),
-            "def_variant":  "nist_clock",
-            "gateware":     ("spi0", 0x000000),
-            "bootloader":   ("spi0", 0xaf0000),
-            "storage":      ("spi0", 0xb30000),
-            "firmware":     ("spi0", 0xb40000),
-        },
         "kasli": {
             "programmer":   partial(ProgrammerXC7, board="kasli", proxy="bscan_spi_xc7a100t.bit"),
             "def_variant":  "opticlock",
@@ -282,6 +282,14 @@ def main():
             "storage":      ("spi1", 0x040000),
             "firmware":     ("spi1", 0x050000),
             "rtm_gateware": ("spi1", 0x200000),
+        },
+        "kc705": {
+            "programmer":   partial(ProgrammerXC7, board="kc705", proxy="bscan_spi_xc7k325t.bit"),
+            "def_variant":  "nist_clock",
+            "gateware":     ("spi0", 0x000000),
+            "bootloader":   ("spi0", 0xaf0000),
+            "storage":      ("spi0", 0xb30000),
+            "firmware":     ("spi0", 0xb40000),
         },
     }[args.target]
 
@@ -332,7 +340,7 @@ def main():
             gateware_bin = convert_gateware(
                 artifact_path(variant, "gateware", "top.bit"))
             programmer.write_binary(*config["gateware"], gateware_bin)
-            if args.target == "sayma":
+            if args.target == "sayma" and args.variant != "master":
                 rtm_gateware_bin = convert_gateware(
                     artifact_path("rtm_gateware", "rtm.bit"), header=True)
                 programmer.write_binary(*config["rtm_gateware"],
@@ -344,7 +352,7 @@ def main():
             storage_img = args.storage
             programmer.write_binary(*config["storage"], storage_img)
         elif action == "firmware":
-            if variant == "satellite":
+            if variant.endswith("satellite"):
                 firmware = "satman"
             else:
                 firmware = "runtime"
@@ -362,6 +370,12 @@ def main():
                 programmer.load(gateware_bit, 0)
         elif action == "start":
             programmer.start()
+        elif action == "erase":
+            if args.target == "sayma":
+                programmer.erase_flash("spi0")
+                programmer.erase_flash("spi1")
+            else:
+                programmer.erase_flash("spi0")
         else:
             raise ValueError("invalid action", action)
 

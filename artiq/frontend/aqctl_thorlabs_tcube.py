@@ -22,7 +22,7 @@ def get_argparser():
                         help="Put the driver in simulation mode, even if "
                              "--device is used.")
     simple_network_args(parser, 3255)
-    verbosity_args(parser)
+    add_common_args(parser)
     return parser
 
 
@@ -53,6 +53,8 @@ def main():
             dev = Tdc(args.device)
         elif product == "tpz001":
             dev = Tpz(args.device)
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(dev.get_tpz_io_settings())
         else:
             print("Invalid product string (-P/--product), "
                   "choose from tdc001 or tpz001")

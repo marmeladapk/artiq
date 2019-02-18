@@ -16,6 +16,7 @@ from misoc.integration.wb_slaves import WishboneSlaveManager
 from misoc.integration.cpu_interface import get_csr_csv
 
 from artiq.gateware import serwb
+from artiq.gateware import jesd204_tools
 from artiq import __version__ as artiq_version
 
 
@@ -31,7 +32,7 @@ class CRG(Module):
         serwb_refclk_bufr = Signal()
         serwb_refclk_bufg = Signal()
         self.specials += Instance("BUFR", i_I=self.serwb_refclk, o_O=serwb_refclk_bufr)
-        self.specials += Instance("BUFG", i_I=serwb_refclk_bufr, o_O=serwb_refclk_bufg)  
+        self.specials += Instance("BUFG", i_I=serwb_refclk_bufr, o_O=serwb_refclk_bufg)
 
         pll_locked = Signal()
         pll_fb = Signal()
@@ -102,6 +103,7 @@ class RTMScratch(Module, AutoCSR):
             read_data.status.eq(fifo.source.data)
         ]
 
+
 CSR_RANGE_SIZE = 0x800
 
 
@@ -110,6 +112,7 @@ class SaymaRTM(Module):
         csr_devices = []
 
         self.submodules.crg = CRG(platform)
+
         clk_freq = 125e6
 
         self.submodules.rtm_magic = RTMMagic()
@@ -123,12 +126,10 @@ class SaymaRTM(Module):
         self.submodules.clock_mux = gpio.GPIOOut(Cat(
             platform.request("clk_src_ext_sel"),
             platform.request("ref_clk_src_sel"),
-            platform.request("dac_clk_src_sel")))
+            platform.request("dac_clk_src_sel"),
+            platform.request("ref_lo_clk_sel")),
+            reset_out=0b0111)
         csr_devices.append("clock_mux")
-
-        # UART loopback
-        serial = platform.request("serial")
-        self.comb += serial.tx.eq(serial.rx)
 
         # Allaki: enable RF output, GPIO access to attenuator
         self.comb += [
@@ -163,22 +164,31 @@ class SaymaRTM(Module):
         csr_devices.append("allaki_atts")
 
         # HMC clock chip and DAC control
-        self.comb += [
-            platform.request("ad9154_rst_n").eq(1),
-            platform.request("ad9154_txen", 0).eq(0b11),
-            platform.request("ad9154_txen", 1).eq(0b11)
-        ]
-
+        self.comb += platform.request("ad9154_rst_n").eq(1)
         self.submodules.converter_spi = spi2.SPIMaster(spi2.SPIInterface(
             platform.request("hmc_spi"),
             platform.request("ad9154_spi", 0),
             platform.request("ad9154_spi", 1)))
         csr_devices.append("converter_spi")
-        self.comb += platform.request("hmc7043_reset").eq(0)
+        self.submodules.hmc7043_reset = gpio.GPIOOut(
+            platform.request("hmc7043_reset"), reset_out=1)
+        csr_devices.append("hmc7043_reset")
+        self.submodules.hmc7043_gpo = gpio.GPIOIn(
+            platform.request("hmc7043_gpo"))
+        csr_devices.append("hmc7043_gpo")
+
+        # DDMTD
+        self.clock_domains.cd_rtio = ClockDomain(reset_less=True)
+        rtio_clock_pads = platform.request("si5324_clkout_fabric")
+        self.specials += Instance("IBUFGDS", i_I=rtio_clock_pads.p, i_IB=rtio_clock_pads.n,
+            o_O=self.cd_rtio.clk)
+        self.submodules.sysref_ddmtd = jesd204_tools.DDMTD(
+            platform.request("rtm_master_aux_clk"), 150e6)
+        csr_devices.append("sysref_ddmtd")
 
         # AMC/RTM serwb
         serwb_pads = platform.request("amc_rtm_serwb")
-        platform.add_period_constraint(serwb_pads.clk_p, 8.)
+        platform.add_period_constraint(serwb_pads.clk, 8.)
         serwb_phy_rtm = serwb.genphy.SERWBPHY(platform.device, serwb_pads, mode="slave")
         self.submodules.serwb_phy_rtm = serwb_phy_rtm
         self.comb += [
@@ -211,7 +221,7 @@ class SaymaRTM(Module):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ARTIQ device binary builder for Kasli systems")
+        description="Sayma RTM gateware builder")
     parser.add_argument("--output-dir", default="artiq_sayma/rtm_gateware",
                         help="output directory for generated "
                              "source files and binaries")

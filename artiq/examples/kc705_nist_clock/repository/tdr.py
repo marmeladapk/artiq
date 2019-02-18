@@ -44,7 +44,7 @@ class TDR(EnvExperiment):
         try:
             self.many(n, self.core.seconds_to_mu(pulse))
         except PulseNotReceivedError:
-            print("to few edges: cable too long or wiring bad")
+            print("too few edges: cable too long or wiring bad")
         else:
             print(self.t)
             t_rise = mu_to_seconds(self.t[0], self.core)/n - latency
@@ -66,8 +66,8 @@ class TDR(EnvExperiment):
             self.pmt0.gate_both_mu(2*p)
             self.ttl2.pulse_mu(p)
         for i in range(len(self.t)):
-            ti = self.pmt0.timestamp_mu()
+            ti = self.pmt0.timestamp_mu(now_mu())
             if ti <= 0:
                 raise PulseNotReceivedError()
             self.t[i] = int(self.t[i] + ti - t0)
-        self.pmt0.count()  # flush
+        self.pmt0.count(now_mu())  # flush

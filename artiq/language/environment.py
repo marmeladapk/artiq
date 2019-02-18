@@ -1,3 +1,4 @@
+import warnings
 from collections import OrderedDict
 from inspect import isclass
 
@@ -230,7 +231,7 @@ class HasEnvironment:
         instead: when the repository is scanned to build the list of
         available experiments and when the dataset browser ``artiq_browser``
         is used to open or run the analysis stage of an experiment. Do not
-        rely on being able to operate on devices or arguments in ``build()``.
+        rely on being able to operate on devices or arguments in :meth:`build`.
 
         Datasets are read-only in this method.
 
@@ -277,7 +278,7 @@ class HasEnvironment:
 
     def setattr_device(self, key):
         """Sets a device driver as attribute. The names of the device driver
-         and of the attribute are the same.
+        and of the attribute are the same.
 
         The key is added to the instance's kernel invariants."""
         setattr(self, key, self.get_device(key))
@@ -286,7 +287,7 @@ class HasEnvironment:
 
     @rpc(flags={"async"})
     def set_dataset(self, key, value,
-                    broadcast=False, persist=False, save=True):
+                    broadcast=False, persist=False, archive=True, save=None):
         """Sets the contents and handling modes of a dataset.
 
         Datasets must be scalars (``bool``, ``int``, ``float`` or NumPy scalar)
@@ -296,10 +297,15 @@ class HasEnvironment:
             dispatches it.
         :param persist: the master should store the data on-disk. Implies
             broadcast.
-        :param save: the data is saved into the local storage of the current
+        :param archive: the data is saved into the local storage of the current
             run (archived as a HDF5 file).
+        :param save: deprecated.
         """
-        self.__dataset_mgr.set(key, value, broadcast, persist, save)
+        if save is not None:
+            warnings.warn("set_dataset save parameter is deprecated, "
+                          "use archive instead", FutureWarning)
+            archive = save
+        self.__dataset_mgr.set(key, value, broadcast, persist, archive)
 
     @rpc(flags={"async"})
     def mutate_dataset(self, key, index, value):
@@ -328,8 +334,10 @@ class HasEnvironment:
         By default, datasets obtained by this method are archived into the output
         HDF5 file of the experiment. If an archived dataset is requested more
         than one time (and therefore its value has potentially changed) or is
-        modified, a warning is emitted. Archival can be turned off by setting
-        the ``archive`` argument to ``False``.
+        modified, a warning is emitted.
+
+        :param archive: Set to ``False`` to prevent archival together with the run's results.
+            Default is ``True``
         """
         try:
             return self.__dataset_mgr.get(key, archive)
@@ -355,7 +363,7 @@ class Experiment:
         """Entry point for pre-computing data necessary for running the
         experiment.
 
-        Doing such computations outside of ``run`` enables more efficient
+        Doing such computations outside of :meth:`run` enables more efficient
         scheduling of multiple experiments that need to access the shared
         hardware during part of their execution.
 
@@ -371,8 +379,8 @@ class Experiment:
 
         This method may interact with the hardware.
 
-        The experiment may call the scheduler's ``pause`` method while in
-        ``run``.
+        The experiment may call the scheduler's :meth:`pause` method while in
+        :meth:`run`.
         """
         raise NotImplementedError
 
@@ -382,7 +390,7 @@ class Experiment:
         This method may be overloaded by the user to implement the analysis
         phase of the experiment, for example fitting curves.
 
-        Splitting this phase from ``run`` enables tweaking the analysis
+        Splitting this phase from :meth:`run` enables tweaking the analysis
         algorithm on pre-existing data, and CPU-bound analyses to be run
         overlapped with the next experiment in a pipelined manner.
 
@@ -392,13 +400,14 @@ class Experiment:
 
 
 class EnvExperiment(Experiment, HasEnvironment):
-    """Base class for top-level experiments that use the ``HasEnvironment``
-    environment manager.
+    """Base class for top-level experiments that use the
+    :class:`~artiq.language.environment.HasEnvironment` environment manager.
 
     Most experiments should derive from this class."""
     def prepare(self):
-        """The default prepare method calls prepare for all children, in the
-        order of instantiation, if the child has a prepare method."""
+        """This default prepare method calls :meth:`~artiq.language.environment.Experiment.prepare`
+        for all children, in the order of instantiation, if the child has a
+        :meth:`~artiq.language.environment.Experiment.prepare` method."""
         for child in self.children:
             if hasattr(child, "prepare"):
                 child.prepare()

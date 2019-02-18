@@ -1,20 +1,23 @@
 from migen import *
-from migen.genlib.cdc import MultiReg
+from migen.genlib.cdc import MultiReg, PulseSynchronizer
 
 from misoc.interconnect.csr import *
 
 
-# This code assumes 125/62.5MHz reference clock and 150MHz RTIO frequency.
+# This code assumes 125/62.5MHz reference clock and 125MHz or 150MHz RTIO
+# frequency.
 
 class SiPhaser7Series(Module, AutoCSR):
-    def __init__(self, si5324_clkin, si5324_clkout_fabric,
-                 ref_clk=None, ref_div2=False):
+    def __init__(self, si5324_clkin, rx_synchronizer,
+                 ref_clk=None, ref_div2=False, rtio_clk_freq=150e6):
         self.switch_clocks = CSRStorage()
         self.phase_shift = CSR()
         self.phase_shift_done = CSRStatus(reset=1)
-        self.sample_result = CSRStatus()
+        self.error = CSR()
 
-        # 125MHz/62.5MHz reference clock to 150MHz. VCO @ 750MHz.
+        assert rtio_clk_freq in (125e6, 150e6)
+
+        # 125MHz/62.5MHz reference clock to 125MHz/150MHz. VCO @ 750MHz.
         # Used to provide a startup clock to the transceiver through the Si,
         # we do not use the crystal reference so that the PFD (f3) frequency
         # can be high.
@@ -31,18 +34,20 @@ class SiPhaser7Series(Module, AutoCSR):
 
                 o_CLKFBOUT=mmcm_freerun_fb, i_CLKFBIN=mmcm_freerun_fb,
 
-                p_CLKOUT0_DIVIDE_F=5.0, o_CLKOUT0=mmcm_freerun_output,
+                p_CLKOUT0_DIVIDE_F=750e6/rtio_clk_freq,
+                o_CLKOUT0=mmcm_freerun_output,
             )
-        
-        # 150MHz to 150MHz with controllable phase shift, VCO @ 1200MHz.
-        # Inserted between CDR and output to Si, used to correct 
+
+        # 125MHz/150MHz to 125MHz/150MHz with controllable phase shift,
+        # VCO @ 1000MHz/1200MHz.
+        # Inserted between CDR and output to Si, used to correct
         # non-determinstic skew of Si5324.
         mmcm_ps_fb = Signal()
         mmcm_ps_output = Signal()
         mmcm_ps_psdone = Signal()
         self.specials += \
             Instance("MMCME2_ADV",
-                p_CLKIN1_PERIOD=1e9/150e6,
+                p_CLKIN1_PERIOD=1e9/rtio_clk_freq,
                 i_CLKIN1=ClockSignal("rtio_rx0"),
                 i_RST=ResetSignal("rtio_rx0"),
                 i_CLKINSEL=1,  # yes, 1=CLKIN1 0=CLKIN2
@@ -80,16 +85,24 @@ class SiPhaser7Series(Module, AutoCSR):
             )
         ]
 
-        si5324_clkout_se = Signal()
-        self.specials += \
-            Instance("IBUFDS",
-                p_DIFF_TERM="TRUE", p_IBUF_LOW_PWR="TRUE",
-                i_I=si5324_clkout_fabric.p, i_IB=si5324_clkout_fabric.n,
-                o_O=si5324_clkout_se),
-        
-        clkout_sample1 = Signal()  # IOB register
-        self.sync.rtio_rx0 += clkout_sample1.eq(si5324_clkout_se)
-        self.specials += MultiReg(clkout_sample1, self.sample_result.status)
+        # The RX synchronizer is tested for setup/hold violations by feeding it a
+        # toggling pattern and checking that the same toggling pattern comes out.
+        toggle_in = Signal()
+        self.sync.rtio_rx0 += toggle_in.eq(~toggle_in)
+        toggle_out = rx_synchronizer.resync(toggle_in)
+
+        toggle_out_expected = Signal()
+        self.sync.rtio += toggle_out_expected.eq(~toggle_out)
+
+        error = Signal()
+        error_clear = PulseSynchronizer("sys", "rtio")
+        self.submodules += error_clear
+        self.sync.rtio += [
+            If(toggle_out != toggle_out_expected, error.eq(1)),
+            If(error_clear.o, error.eq(0))
+        ]
+        self.specials += MultiReg(error, self.error.w)
+        self.comb += error_clear.i.eq(self.error.re)
 
         # expose MMCM outputs - used for clock constraints
         self.mmcm_freerun_output = mmcm_freerun_output

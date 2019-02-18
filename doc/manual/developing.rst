@@ -56,7 +56,7 @@ Preparing the build environment for the core device
 ---------------------------------------------------
 
 These steps are required to generate code that can run on the core
-device. They are necessary both for building the MiSoC BIOS
+device. They are necessary both for building the firmware
 and the ARTIQ kernels.
 
 * Install required host packages: ::
@@ -95,9 +95,9 @@ and the ARTIQ kernels.
 * Install LLVM and Clang: ::
 
         $ cd ~/artiq-dev
-        $ git clone -b artiq-4.0 https://github.com/m-labs/llvm-or1k
+        $ git clone -b artiq-6.0 https://github.com/m-labs/llvm-or1k
         $ cd llvm-or1k
-        $ git clone -b artiq-4.0 https://github.com/m-labs/clang-or1k tools/clang
+        $ git clone -b artiq-6.0 https://github.com/m-labs/clang-or1k tools/clang
 
         $ mkdir build
         $ cd build
@@ -108,7 +108,7 @@ and the ARTIQ kernels.
 * Install Rust: ::
 
         $ cd ~/artiq-dev
-        $ git clone -b artiq-1.23.0 https://github.com/m-labs/rust
+        $ git clone -b artiq-1.28.0 https://github.com/m-labs/rust
         $ cd rust
         $ git submodule update --init --recursive
         $ mkdir build
@@ -117,19 +117,20 @@ and the ARTIQ kernels.
         $ sudo mkdir /usr/local/rust-or1k
         $ sudo chown $USER.$USER /usr/local/rust-or1k
         $ make install
+        $ cd ..
 
-        $ libs="core std_unicode alloc"
-        $ rustc="/usr/local/rust-or1k/bin/rustc --target or1k-unknown-none -C target-feature=+mul,+div,+ffl1,+cmov,+addc -C opt-level=s -g --crate-type rlib -L ."
         $ destdir="/usr/local/rust-or1k/lib/rustlib/or1k-unknown-none/lib/"
-        $ mkdir ../build-or1k
-        $ cd ../build-or1k
-        $ for lib in ${libs}; do ${rustc} --crate-name ${lib} ../src/lib${lib}/lib.rs; done
-        $ ${rustc} --crate-name libc ../src/liblibc_mini/lib.rs
-        $ ${rustc} --crate-name unwind ../src/libunwind/lib.rs
-        $ ${rustc} -Cpanic=abort --crate-name panic_abort ../src/libpanic_abort/lib.rs
-        $ ${rustc} -Cpanic=unwind --crate-name panic_unwind ../src/libpanic_unwind/lib.rs --cfg llvm_libunwind
+        $ rustc="rustc --out-dir ${destdir} -L ${destdir} --target or1k-unknown-none -g -C target-feature=+mul,+div,+ffl1,+cmov,+addc -C opt-level=s --crate-type rlib"
         $ mkdir -p ${destdir}
-        $ cp *.rlib ${destdir}
+        $ ${rustc} --crate-name core src/libcore/lib.rs
+        $ ${rustc} --crate-name compiler_builtins src/libcompiler_builtins/src/lib.rs --cfg $ 'feature="compiler-builtins"' --cfg 'feature="mem"'
+        $ ${rustc} --crate-name std_unicode src/libstd_unicode/lib.rs
+        $ ${rustc} --crate-name alloc src/liballoc/lib.rs
+        $ ${rustc} --crate-name libc src/liblibc_mini/lib.rs
+        $ ${rustc} --crate-name unwind src/libunwind/lib.rs
+        $ ${rustc} -Cpanic=abort --crate-name panic_abort src/libpanic_abort/lib.rs
+        $ ${rustc} -Cpanic=unwind --crate-name panic_unwind src/libpanic_unwind/lib.rs \
+          --cfg llvm_libunwind
 
 .. note::
     Compilation of LLVM can take more than 30 min on some machines. Compilation of Rust can take more than two hours.
@@ -225,6 +226,10 @@ These steps are required to generate gateware bitstream (``.bit``) files, build 
 
 .. _build-target-binaries:
 
+    * For Kasli::
+
+        $ python3 -m artiq.gateware.targets.kasli -V <your_variant>
+
     * For KC705::
 
         $ python3 -m artiq.gateware.targets.kc705 -V nist_clock # or nist_qc2
@@ -233,13 +238,9 @@ These steps are required to generate gateware bitstream (``.bit``) files, build 
 
 .. _flash-target-binaries:
 
-* Then, gather the binaries and flash them: ::
+* Then, flash the binaries: ::
 
-        $ mkdir binaries
-        $ cp misoc_nist_qcX_<board>/gateware/top.bit binaries
-        $ cp misoc_nist_qcX_<board>/software/bios/bios.bin binaries
-        $ cp misoc_nist_qcX_<board>/software/runtime/runtime.fbi binaries
-        $ artiq_flash -d binaries
+        $ artiq_flash --srcbuild artiq_kasli -V <your_variant>
 
 * Check that the board boots by running a serial terminal program (you may need to press its FPGA reconfiguration button or power-cycle it to load the gateware bitstream that was newly written into the flash): ::
 

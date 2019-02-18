@@ -1,7 +1,7 @@
 """
 This module provides a remote procedure call (RPC) mechanism over sockets
 between conventional computers (PCs) running Python. It strives to be
-transparent and uses ``artiq.protocols.pyon`` internally so that e.g. Numpy
+transparent and uses :mod:`artiq.protocols.pyon` internally so that e.g. Numpy
 arrays can be easily used.
 
 Note that the server operates on copies of objects provided by the client,
@@ -11,19 +11,18 @@ client passes a list as a parameter of an RPC method, and that method
 client's list.
 """
 
-import socket
 import asyncio
+import inspect
+import logging
+import socket
 import threading
 import time
-import logging
-import inspect
 from operator import itemgetter
 
 from artiq.monkey_patches import *
 from artiq.protocols import pyon
 from artiq.protocols.asyncio_server import AsyncioServer as _AsyncioServer
 from artiq.protocols.packed_exceptions import *
-
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +60,18 @@ class Client:
     can be used as if they were local methods.
 
     For example, if the server provides method ``foo``, and ``c`` is a local
-    ``Client`` object, then the method can be called as: ::
+    :class:`.Client` object, then the method can be called as: ::
 
         result = c.foo(param1, param2)
 
-    The parameters and the result are automatically transferred with the
+    The parameters and the result are automatically transferred from the
     server.
 
     Only methods are supported. Attributes must be accessed by providing and
     using "get" and/or "set" methods on the server side.
 
     At object initialization, the connection to the remote server is
-    automatically attempted. The user must call ``close_rpc`` to
+    automatically attempted. The user must call :meth:`~artiq.protocols.pc_rpc.Client.close_rpc` to
     free resources properly after initialization completes successfully.
 
     :param host: Identifier of the server. The string can represent a
@@ -81,11 +80,11 @@ class Client:
     :param port: TCP port to use.
     :param target_name: Target name to select. ``IncompatibleServer`` is
         raised if the target does not exist.
-        Use ``AutoTarget`` for automatic selection if the server has only one
+        Use :class:`.AutoTarget` for automatic selection if the server has only one
         target.
         Use ``None`` to skip selecting a target. The list of targets can then
-        be retrieved using ``get_rpc_id`` and then one can be selected later
-        using ``select_rpc_target``.
+        be retrieved using :meth:`~artiq.protocols.pc_rpc.Client.get_rpc_id`
+        and then one can be selected later using :meth:`~artiq.protocols.pc_rpc.Client.select_rpc_target`.
     :param timeout: Socket operation timeout. Use ``None`` for blocking
         (default), ``0`` for non-blocking, and a finite value to raise
         ``socket.timeout`` if an operation does not complete within the
@@ -198,7 +197,7 @@ class AsyncioClient:
 
     async def connect_rpc(self, host, port, target_name):
         """Connects to the server. This cannot be done in __init__ because
-        this method is a coroutine. See ``Client`` for a description of the
+        this method is a coroutine. See :class:`artiq.protocols.pc_rpc.Client` for a description of the
         parameters."""
         self.__reader, self.__writer = \
             await asyncio.open_connection(host, port, limit=100*1024*1024)
@@ -447,7 +446,8 @@ class _PrettyPrintCall:
 
 class Server(_AsyncioServer):
     """This class creates a TCP server that handles requests coming from
-    ``Client`` objects.
+    *Client* objects (whether :class:`.Client`, :class:`.BestEffortClient`,
+    or :class:`.AsyncioClient`).
 
     The server is designed using ``asyncio`` so that it can easily support
     multiple connections without the locking issues that arise in
@@ -486,6 +486,27 @@ class Server(_AsyncioServer):
         else:
             self._noparallel = asyncio.Lock()
 
+    @staticmethod
+    def _document_function(function):
+        """
+        Turn a function into a tuple of its arguments and documentation.
+        
+        Allows remote inspection of what methods are available on a local device.
+        
+        Args:
+            function (Callable): a Python function to be documented.
+        
+        Returns:
+            Tuple[dict, str]: tuple of (argument specifications, 
+            function documentation).
+            Any type annotations are converted to strings (for PYON serialization).
+        """
+        argspec_dict = dict(inspect.getfullargspec(function)._asdict())
+        # Fix issue #1186: PYON can't serialize type annotations.
+        if any(argspec_dict.get("annotations", {})):
+            argspec_dict["annotations"] = str(argspec_dict["annotations"])
+        return argspec_dict, inspect.getdoc(function)
+
     async def _process_action(self, target, obj):
         if self._noparallel is not None:
             await self._noparallel.acquire()
@@ -500,9 +521,7 @@ class Server(_AsyncioServer):
                     if name.startswith("_"):
                         continue
                     method = getattr(target, name)
-                    argspec = inspect.getfullargspec(method)
-                    doc["methods"][name] = (dict(argspec._asdict()),
-                                            inspect.getdoc(method))
+                    doc["methods"][name] = self._document_function(method)
                 if self.builtin_terminate:
                     doc["methods"]["terminate"] = (
                         {
@@ -514,6 +533,7 @@ class Server(_AsyncioServer):
                             "kwonlydefaults": [],
                         },
                         "Terminate the server.")
+                logger.debug("RPC docs for %s: %s", target, doc)
                 return {"status": "ok", "ret": doc}
             elif obj["action"] == "call":
                 logger.debug("calling %s", _PrettyPrintCall(obj))
@@ -591,7 +611,7 @@ def simple_server_loop(targets, host, port, description=None):
     """Runs a server until an exception is raised (e.g. the user hits Ctrl-C)
     or termination is requested by a client.
 
-    See ``Server`` for a description of the parameters.
+    See :class:`artiq.protocols.pc_rpc.Server` for a description of the parameters.
     """
     loop = asyncio.get_event_loop()
     try:

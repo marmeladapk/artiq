@@ -11,6 +11,7 @@ const ADDRESS: u8 = 0x68;
 
 #[cfg(any(soc_platform = "kasli",
           soc_platform = "sayma_amc",
+          soc_platform = "sayma_rtm",
           soc_platform = "kc705"))]
 fn pca9548_select(address: u8, channels: u8) -> Result<()> {
     i2c::start(BUSNO).unwrap();
@@ -177,6 +178,7 @@ fn locked() -> Result<bool> {
 }
 
 fn monitor_lock() -> Result<()> {
+    info!("waiting for Si5324 lock...");
     let t = clock::get_ms();
     while !locked()? {
         // Yes, lock can be really slow.
@@ -184,13 +186,11 @@ fn monitor_lock() -> Result<()> {
             return Err("Si5324 lock timeout");
         }
     }
-    info!("Si5324 is locked");
+    info!("  ...locked");
     Ok(())
 }
 
-pub fn setup(settings: &FrequencySettings, input: Input) -> Result<()> {
-    let s = map_frequency_settings(settings)?;
-
+fn init() -> Result<()> {
     #[cfg(not(si5324_soft_reset))]
     hard_reset();
 
@@ -201,6 +201,8 @@ pub fn setup(settings: &FrequencySettings, input: Input) -> Result<()> {
     }
     #[cfg(soc_platform = "sayma_amc")]
     pca9548_select(0x70, 1 << 4)?;
+    #[cfg(soc_platform = "sayma_rtm")]
+    pca9548_select(0x77, 1 << 5)?;
     #[cfg(soc_platform = "kc705")]
     pca9548_select(0x74, 1 << 7)?;
 
@@ -210,17 +212,37 @@ pub fn setup(settings: &FrequencySettings, input: Input) -> Result<()> {
 
     #[cfg(si5324_soft_reset)]
     soft_reset()?;
+    Ok(())
+}
 
+pub fn bypass(input: Input) -> Result<()> {
     let cksel_reg = match input {
         Input::Ckin1 => 0b00,
         Input::Ckin2 => 0b01,
     };
+    init()?;
+    write(21,  read(21)? & 0xfe)?;                        // CKSEL_PIN=0
+    write(3,   (read(3)? & 0x3f) | (cksel_reg << 6))?;    // CKSEL_REG
+    write(4,   (read(4)? & 0x3f) | (0b00 << 6))?;         // AUTOSEL_REG=b00
+    write(6,   (read(6)? & 0xc0) | 0b111111)?;            // SFOUT2_REG=b111 SFOUT1_REG=b111
+    write(0,   (read(0)? & 0xfd) | 0x02)?;                // BYPASS_REG=1
+    Ok(())
+}
+
+pub fn setup(settings: &FrequencySettings, input: Input) -> Result<()> {
+    let s = map_frequency_settings(settings)?;
+    let cksel_reg = match input {
+        Input::Ckin1 => 0b00,
+        Input::Ckin2 => 0b01,
+    };
+
+    init()?;
     if settings.crystal_ref {
         write(0,   read(0)? | 0x40)?;                     // FREE_RUN=1
     }
     write(2,   (read(2)? & 0x0f) | (s.bwsel << 4))?;
     write(21,  read(21)? & 0xfe)?;                        // CKSEL_PIN=0
-    write(3,   (read(3)? & 0x3f) | (cksel_reg << 6) | 0x10)?;  // CKSEL_REG, SQ_ICAL=1
+    write(3,   (read(3)? & 0x2f) | (cksel_reg << 6) | 0x10)?;  // CKSEL_REG, SQ_ICAL=1
     write(4,   (read(4)? & 0x3f) | (0b00 << 6))?;         // AUTOSEL_REG=b00
     write(6,   (read(6)? & 0xc0) | 0b111111)?;            // SFOUT2_REG=b111 SFOUT1_REG=b111
     write(25,  (s.n1_hs  << 5 ) as u8)?;
@@ -290,66 +312,50 @@ pub mod siphaser {
         clock::spin_us(500);
     }
 
-    fn get_phaser_sample() -> bool {
-        let mut sample = true;
-        for _ in 0..32 {
-            if unsafe { csr::siphaser::sample_result_read() } == 0 {
-                sample = false;
-            }
+    fn has_error() -> bool {
+        unsafe {
+            csr::siphaser::error_write(1);
         }
-        sample
+        clock::spin_us(5000);
+        unsafe {
+            csr::siphaser::error_read() != 0
+        }
     }
 
-    const PS_MARGIN: u32 = 28;
+    fn find_edge(target: bool) -> Result<u32> {
+        let mut nshifts = 0;
 
-    fn get_stable_phaser_sample() -> (bool, u32) {
-        let mut nshifts: u32 = 0;
+        let mut previous = has_error();
         loop {
-            let s1 = get_phaser_sample();
-            for _ in 0..PS_MARGIN {
-                phase_shift(1);
-            }
-            let s2 = get_phaser_sample();
-            for _ in 0..PS_MARGIN {
-                phase_shift(1);
-            }
-            let s3 = get_phaser_sample();
-            nshifts += 2*PS_MARGIN;
-            if s1 == s2 && s2 == s3 {
-                for _ in 0..PS_MARGIN {
-                    phase_shift(0);
-                }
-                nshifts -= PS_MARGIN;
-                return (s2, nshifts);
-            }
-        }
-    }
-
-    pub fn calibrate_skew(skew: u16) -> Result<()> {
-        // Get into a 0 region
-        let (s1, mut nshifts) = get_stable_phaser_sample();
-        if s1 {
-            while get_phaser_sample() {
-                phase_shift(1);
-                nshifts += 1;
-            }
-            for _ in 0..PS_MARGIN {
-                phase_shift(1);
-            }
-            nshifts += PS_MARGIN;
-        }
-
-        // Get to the 0->1 transition
-        while !get_phaser_sample() {
             phase_shift(1);
             nshifts += 1;
+            let current = has_error();
+            if previous != target && current == target {
+                return Ok(nshifts);
+            }
+            if nshifts > 5000 {
+                return Err("failed to find timing error edge");
+            }
+            previous = current;
         }
-        info!("nshifts to 0->1 siphaser transition: {} ({}deg)", nshifts, nshifts*360/(56*8));
+    }
 
-        // Apply specified skew referenced to that transition
-        for _ in 0..skew {
+    pub fn calibrate_skew() -> Result<()> {
+        let jitter_margin = 32;
+        let lead = find_edge(false)?;
+        for _ in 0..jitter_margin {
             phase_shift(1);
         }
+        let width = find_edge(true)? + jitter_margin;
+        // width is 360 degrees (one full rotation of the phase between s/h limits) minus jitter
+        info!("calibration successful, lead: {}, width: {} ({}deg)", lead, width, width*360/(56*8));
+
+        // Apply reverse phase shift for half the width to get into the
+        // middle of the working region.
+        for _ in 0..width/2 {
+            phase_shift(0);
+        }
+
         Ok(())
     }
 }

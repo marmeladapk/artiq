@@ -28,19 +28,20 @@ def kernel(arg=None, flags={}):
     This decorator marks an object's method for execution on the core
     device.
 
-    When a decorated method is called from the Python interpreter, the ``core``
+    When a decorated method is called from the Python interpreter, the :attr:`core`
     attribute of the object is retrieved and used as core device driver. The
     core device driver will typically compile, transfer and run the method
     (kernel) on the device.
 
     When kernels call another method:
-        - if the method is a kernel for the same core device, is it compiled
+
+        - if the method is a kernel for the same core device, it is compiled
           and sent in the same binary. Calls between kernels happen entirely on
           the device.
         - if the method is a regular Python method (not a kernel), it generates
           a remote procedure call (RPC) for execution on the host.
 
-    The decorator takes an optional parameter that defaults to ``core`` and
+    The decorator takes an optional parameter that defaults to :attr`core` and
     specifies the name of the attribute to use as core device driver.
 
     This decorator must be present in the global namespace of all modules using
@@ -117,7 +118,7 @@ def syscall(arg=None, flags={}):
         def inner_decorator(function):
             function.artiq_embedded = \
                 _ARTIQEmbeddedInfo(core_name=None, portable=False, function=None,
-                                   syscall=function.__name__, forbidden=False,
+                                   syscall=arg, forbidden=False,
                                    flags=set(flags))
             return function
         return inner_decorator
@@ -198,7 +199,12 @@ def delay_mu(duration):
 
 
 def now_mu():
-    """Retrieves the current RTIO time, in machine units."""
+    """Retrieve the current RTIO timeline cursor, in machine units.
+
+    Note the conceptual difference between this and the current value of the
+    hardware RTIO counter; see e.g.
+    :meth:`artiq.coredevice.core.Core.get_rtio_counter_mu` for the latter.
+    """
     return _time_manager.get_time_mu()
 
 

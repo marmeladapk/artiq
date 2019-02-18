@@ -1,7 +1,11 @@
 import sys
+import os
 import select
 
 from artiq.experiment import *
+
+if os.name == "nt":
+    import msvcrt
 
 
 def chunker(seq, size):
@@ -16,11 +20,17 @@ def chunker(seq, size):
 
 
 def is_enter_pressed() -> TBool:
-    if select.select([sys.stdin,], [], [], 0.0)[0]:
-        sys.stdin.read(1)
-        return True
+    if os.name == "nt":
+        if msvcrt.kbhit() and msvcrt.getch() == b"\r":
+            return True
+        else:
+            return False
     else:
-        return False
+        if select.select([sys.stdin, ], [], [], 0.0)[0]:
+            sys.stdin.read(1)
+            return True
+        else:
+            return False
 
 
 class KasliTester(EnvExperiment):
@@ -39,6 +49,7 @@ class KasliTester(EnvExperiment):
         self.urukuls = dict()
         self.samplers = dict()
         self.zotinos = dict()
+        self.grabbers = dict()
 
         ddb = self.get_device_db()
         for name, desc in ddb.items():
@@ -56,10 +67,14 @@ class KasliTester(EnvExperiment):
                     self.urukul_cplds[name] = self.get_device(name)
                 elif (module, cls) == ("artiq.coredevice.ad9910", "AD9910"):
                     self.urukuls[name] = self.get_device(name)
+                elif (module, cls) == ("artiq.coredevice.ad9912", "AD9912"):
+                    self.urukuls[name] = self.get_device(name)
                 elif (module, cls) == ("artiq.coredevice.sampler", "Sampler"):
                     self.samplers[name] = self.get_device(name)
                 elif (module, cls) == ("artiq.coredevice.zotino", "Zotino"):
                     self.zotinos[name] = self.get_device(name)
+                elif (module, cls) == ("artiq.coredevice.grabber", "Grabber"):
+                    self.grabbers[name] = self.get_device(name)
 
         # Remove Urukul, Sampler and Zotino control signals
         # from TTL outs (tested separately)
@@ -90,6 +105,7 @@ class KasliTester(EnvExperiment):
         self.urukuls = sorted(self.urukuls.items(), key=lambda x: x[1].sw.channel)
         self.samplers = sorted(self.samplers.items(), key=lambda x: x[1].cnv.channel)
         self.zotinos = sorted(self.zotinos.items(), key=lambda x: x[1].bus.channel)
+        self.grabbers = sorted(self.grabbers.items(), key=lambda x: x[1].channel_base)
 
     @kernel
     def test_led(self, led):
@@ -146,11 +162,13 @@ class KasliTester(EnvExperiment):
                 for _ in range(n):
                     ttl_out.pulse(2*us)
                     delay(2*us)
-        return ttl_in.count() == n
+        return ttl_in.count(now_mu()) == n
 
     def test_ttl_ins(self):
         print("*** Testing TTL inputs.")
-
+        if not self.ttl_outs:
+            print("No TTL output channel available to use as stimulus.")
+            return
         ttl_out_name, ttl_out_dev = next(iter(self.ttl_outs))
         for ttl_in_name, ttl_in_dev in self.ttl_ins:
             print("Connect {} to {}. Press ENTER when done."
@@ -183,7 +201,7 @@ class KasliTester(EnvExperiment):
             while self.core.get_rtio_counter_mu() < t:
                 pass
             for channel in channels:
-                channel.sw.pulse(100*ms)
+                channel.pulse(100*ms)
                 delay(100*ms)
 
     # We assume that RTIO channels for switches are grouped by card.
@@ -206,7 +224,7 @@ class KasliTester(EnvExperiment):
         input()
 
         print("Testing RF switch control. Press ENTER when done.")
-        self.rf_switch_wave([channel_dev for channel_name, channel_dev in self.urukuls])
+        self.rf_switch_wave([channel_dev.sw for channel_name, channel_dev in self.urukuls])
 
     @kernel
     def get_sampler_voltages(self, sampler, cb):
@@ -262,14 +280,50 @@ class KasliTester(EnvExperiment):
         zotino.load()
 
     def test_zotinos(self):
-        print("*** Testing Zotino DACs.")
-        print("Voltages:")
-        for card_n, (card_name, card_dev) in enumerate(self.zotinos):
-            voltages = [2*card_n + (-1)**i*0.1*(i//2+1) for i in range(32)]
-            print(card_name, " ".join(["{:.1f}".format(x) for x in voltages]))
-            self.set_zotino_voltages(card_dev, voltages)
-        print("Press ENTER when done.")
-        input()
+        if self.zotinos:
+            print("*** Testing Zotino DACs.")
+            print("Voltages:")
+            for card_n, (card_name, card_dev) in enumerate(self.zotinos):
+                voltages = [2*card_n + (-1)**i*0.1*(i//2+1) for i in range(32)]
+                print(card_name, " ".join(["{:.1f}".format(x) for x in voltages]))
+                self.set_zotino_voltages(card_dev, voltages)
+            print("Press ENTER when done.")
+            input()
+
+    @kernel
+    def grabber_capture(self, card_dev, rois):
+        self.core.break_realtime()
+        delay(100*us)
+        mask = 0
+        for i in range(len(rois)):
+            i = rois[i][0]
+            x0 = rois[i][1]
+            y0 = rois[i][2]
+            x1 = rois[i][3]
+            y1 = rois[i][4]
+            mask |= 1 << i
+            card_dev.setup_roi(i, x0, y0, x1, y1)
+        card_dev.gate_roi(mask)
+        n = [0]*len(rois)
+        card_dev.input_mu(n)
+        self.core.break_realtime()
+        card_dev.gate_roi(0)
+        print("ROI sums:", n)
+
+    def test_grabbers(self):
+        if self.grabbers:
+            print("*** Testing Grabber Frame Grabbers.")
+            print("Activate the camera's frame grabber output, type 'g', press "
+                  "ENTER, and trigger the camera.")
+            print("Just press ENTER to skip the test.")
+            if input().strip().lower() != "g":
+                print("skipping...")
+                return
+            rois = [[0, 0, 0, 2, 2], [1, 0, 0, 2048, 2048]]
+            print("ROIs:", rois)
+            for card_n, (card_name, card_dev) in enumerate(self.grabbers):
+                print(card_name)
+                self.grabber_capture(card_dev, rois)
 
     def run(self):
         print("****** Kasli system tester ******")
@@ -281,3 +335,4 @@ class KasliTester(EnvExperiment):
         self.test_urukuls()
         self.test_samplers()
         self.test_zotinos()
+        self.test_grabbers()

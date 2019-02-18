@@ -171,14 +171,14 @@ class AD53xx:
             ctrl = self.read_reg(channel=0, op=AD53XX_READ_CONTROL)
             if ctrl & 0b10000:
                 raise ValueError("DAC over temperature")
-            delay(10*us)
+            delay(25*us)
         self.bus.write(  # enable power and overtemperature shutdown
             (AD53XX_CMD_SPECIAL | AD53XX_SPECIAL_CONTROL | 0b0010) << 8)
         if not blind:
             ctrl = self.read_reg(channel=0, op=AD53XX_READ_CONTROL)
-            if ctrl != 0b0010:
+            if (ctrl & 0b10111) != 0b00010:
                 raise ValueError("DAC CONTROL readback mismatch")
-            delay(10*us)
+            delay(15*us)
 
     @kernel
     def read_reg(self, channel=0, op=AD53XX_READ_X1A):

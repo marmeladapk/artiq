@@ -1,12 +1,12 @@
-#![feature(lang_items, asm, libc, panic_unwind, unwind_attributes, global_allocator,
-           needs_panic_runtime)]
+#![feature(lang_items, asm, panic_unwind, libc, unwind_attributes,
+           panic_implementation, panic_info_message, nll)]
 #![no_std]
-#![needs_panic_runtime]
 
-extern crate cslice;
-extern crate unwind;
 extern crate libc;
+extern crate unwind;
+extern crate cslice;
 
+extern crate eh;
 extern crate io;
 extern crate dyld;
 extern crate board_misoc;
@@ -17,10 +17,11 @@ use core::{mem, ptr, slice, str};
 use cslice::{CSlice, AsCSlice};
 use io::Cursor;
 use dyld::Library;
-use board_misoc::csr;
 use board_artiq::{mailbox, rpc_queue};
 use proto_artiq::{kernel_proto, rpc_proto};
 use kernel_proto::*;
+#[cfg(has_rtio_dma)]
+use board_misoc::csr;
 
 fn send(request: &Message) {
     unsafe { mailbox::send(request as *const _ as usize) }
@@ -47,11 +48,20 @@ macro_rules! recv {
     }
 }
 
-#[no_mangle]
-#[lang = "panic_fmt"]
-pub extern fn panic_fmt(args: core::fmt::Arguments, file: &'static str,
-                        line: u32, column: u32) -> ! {
-    send(&Log(format_args!("panic at {}:{}:{}: {}\n", file, line, column, args)));
+#[no_mangle] // https://github.com/rust-lang/rust/issues/{38281,51647}
+#[panic_implementation]
+pub fn panic_fmt(info: &core::panic::PanicInfo) -> ! {
+    if let Some(location) = info.location() {
+        send(&Log(format_args!("panic at {}:{}:{}",
+                               location.file(), location.line(), location.column())));
+    } else {
+        send(&Log(format_args!("panic at unknown location")));
+    }
+    if let Some(message) = info.message() {
+        send(&Log(format_args!("{}\n", message)));
+    } else {
+        send(&Log(format_args!("\n")));
+    }
     send(&RunAborted);
     loop {}
 }
@@ -68,30 +78,29 @@ macro_rules! println {
 macro_rules! raise {
     ($name:expr, $message:expr, $param0:expr, $param1:expr, $param2:expr) => ({
         use cslice::AsCSlice;
-        let exn = $crate::eh::Exception {
-            name:     concat!("0:artiq.coredevice.exceptions.", $name).as_bytes().as_c_slice(),
-            file:     file!().as_bytes().as_c_slice(),
+        let exn = $crate::eh_artiq::Exception {
+            name:     concat!("0:artiq.coredevice.exceptions.", $name).as_c_slice(),
+            file:     file!().as_c_slice(),
             line:     line!(),
             column:   column!(),
             // https://github.com/rust-lang/rfcs/pull/1719
-            function: "(Rust function)".as_bytes().as_c_slice(),
-            message:  $message.as_bytes().as_c_slice(),
+            function: "(Rust function)".as_c_slice(),
+            message:  $message.as_c_slice(),
             param:    [$param0, $param1, $param2]
         };
         #[allow(unused_unsafe)]
-        unsafe { $crate::eh::raise(&exn) }
+        unsafe { $crate::eh_artiq::raise(&exn) }
     });
     ($name:expr, $message:expr) => ({
         raise!($name, $message, 0, 0, 0)
     });
 }
 
-pub mod eh;
+mod eh_artiq;
 mod api;
 mod rtio;
 mod nrt_bus;
 
-static mut NOW: u64 = 0;
 static mut LIBRARY: Option<Library<'static>> = None;
 
 #[no_mangle]
@@ -106,10 +115,11 @@ pub extern fn send_to_core_log(text: CSlice<u8>) {
 }
 
 #[no_mangle]
-pub extern fn send_to_rtio_log(timestamp: i64, text: CSlice<u8>) {
-    rtio::log(timestamp, text.as_ref())
+pub extern fn send_to_rtio_log(text: CSlice<u8>) {
+    rtio::log(text.as_ref())
 }
 
+#[unwind(aborts)]
 extern fn rpc_send(service: u32, tag: CSlice<u8>, data: *const *const ()) {
     while !rpc_queue::empty() {}
     send(&RpcSend {
@@ -120,6 +130,7 @@ extern fn rpc_send(service: u32, tag: CSlice<u8>, data: *const *const ()) {
     })
 }
 
+#[unwind(aborts)]
 extern fn rpc_send_async(service: u32, tag: CSlice<u8>, data: *const *const ()) {
     while rpc_queue::full() {}
     rpc_queue::enqueue(|mut slice| {
@@ -142,6 +153,7 @@ extern fn rpc_send_async(service: u32, tag: CSlice<u8>, data: *const *const ()) 
     })
 }
 
+#[unwind(allowed)]
 extern fn rpc_recv(slot: *mut ()) -> usize {
     send(&RpcRecvRequest(slot));
     recv!(&RpcRecvReply(ref result) => {
@@ -149,7 +161,7 @@ extern fn rpc_recv(slot: *mut ()) -> usize {
             &Ok(alloc_size) => alloc_size,
             &Err(ref exception) =>
             unsafe {
-                eh::raise(&eh::Exception {
+                eh_artiq::raise(&eh_artiq::Exception {
                     name:     exception.name.as_bytes().as_c_slice(),
                     file:     exception.file.as_bytes().as_c_slice(),
                     line:     exception.line,
@@ -163,7 +175,7 @@ extern fn rpc_recv(slot: *mut ()) -> usize {
     })
 }
 
-fn terminate(exception: &eh::Exception, backtrace: &mut [usize]) -> ! {
+fn terminate(exception: &eh_artiq::Exception, backtrace: &mut [usize]) -> ! {
     let mut cursor = 0;
     for index in 0..backtrace.len() {
         if backtrace[index] > kernel_proto::KERNELCPU_PAYLOAD_ADDRESS {
@@ -173,7 +185,6 @@ fn terminate(exception: &eh::Exception, backtrace: &mut [usize]) -> ! {
     }
     let backtrace = &mut backtrace.as_mut()[0..cursor];
 
-    send(&NowSave(unsafe { NOW }));
     send(&RunException {
         exception: kernel_proto::Exception {
             name:     str::from_utf8(exception.name.as_ref()).unwrap(),
@@ -189,6 +200,7 @@ fn terminate(exception: &eh::Exception, backtrace: &mut [usize]) -> ! {
     loop {}
 }
 
+#[unwind(allowed)]
 extern fn watchdog_set(ms: i64) -> i32 {
     if ms < 0 {
         raise!("ValueError", "cannot set a watchdog with a negative timeout")
@@ -198,10 +210,12 @@ extern fn watchdog_set(ms: i64) -> i32 {
     recv!(&WatchdogSetReply { id } => id) as i32
 }
 
+#[unwind(aborts)]
 extern fn watchdog_clear(id: i32) {
     send(&WatchdogClear { id: id as usize })
 }
 
+#[unwind(aborts)]
 extern fn cache_get(key: CSlice<u8>) -> CSlice<'static, i32> {
     send(&CacheGetRequest {
         key:   str::from_utf8(key.as_ref()).unwrap()
@@ -209,6 +223,7 @@ extern fn cache_get(key: CSlice<u8>) -> CSlice<'static, i32> {
     recv!(&CacheGetReply { value } => value.as_c_slice())
 }
 
+#[unwind(allowed)]
 extern fn cache_put(key: CSlice<u8>, list: CSlice<i32>) {
     send(&CachePutRequest {
         key:   str::from_utf8(key.as_ref()).unwrap(),
@@ -242,6 +257,7 @@ fn dma_record_flush() {
     }
 }
 
+#[unwind(allowed)]
 extern fn dma_record_start(name: CSlice<u8>) {
     let name = str::from_utf8(name.as_ref()).unwrap();
 
@@ -261,6 +277,7 @@ extern fn dma_record_start(name: CSlice<u8>) {
     }
 }
 
+#[unwind(allowed)]
 extern fn dma_record_stop(duration: i64) {
     unsafe {
         dma_record_flush();
@@ -282,22 +299,29 @@ extern fn dma_record_stop(duration: i64) {
     }
 }
 
-extern fn dma_record_output(timestamp: i64, channel: i32, address: i32, word: i32) {
-    dma_record_output_wide(timestamp, channel, address, [word].as_c_slice())
-}
-
-extern fn dma_record_output_wide(timestamp: i64, channel: i32, address: i32, words: CSlice<i32>) {
-    assert!(words.len() <= 16); // enforce the hardware limit
-
+#[unwind(aborts)]
+#[inline(always)]
+unsafe fn dma_record_output_prepare(timestamp: i64, target: i32,
+                                    words: usize) -> &'static mut [u8] {
     // See gateware/rtio/dma.py.
-    let header_length = /*length*/1 + /*channel*/3 + /*timestamp*/8 + /*address*/2;
-    let length = header_length + /*data*/words.len() * 4;
+    const HEADER_LENGTH: usize = /*length*/1 + /*channel*/3 + /*timestamp*/8 + /*address*/1;
+    let length = HEADER_LENGTH + /*data*/words * 4;
 
-    let header = [
+    if DMA_RECORDER.buffer.len() - DMA_RECORDER.data_len < length {
+        dma_record_flush()
+    }
+
+    let record = &mut DMA_RECORDER.buffer[DMA_RECORDER.data_len..
+                                          DMA_RECORDER.data_len + length];
+    DMA_RECORDER.data_len += length;
+
+    let (header, data) = record.split_at_mut(HEADER_LENGTH);
+
+    header.copy_from_slice(&[
         (length    >>  0) as u8,
-        (channel   >>  0) as u8,
-        (channel   >>  8) as u8,
-        (channel   >> 16) as u8,
+        (target    >>  8) as u8,
+        (target    >>  16) as u8,
+        (target    >>  24) as u8,
         (timestamp >>  0) as u8,
         (timestamp >>  8) as u8,
         (timestamp >> 16) as u8,
@@ -306,34 +330,46 @@ extern fn dma_record_output_wide(timestamp: i64, channel: i32, address: i32, wor
         (timestamp >> 40) as u8,
         (timestamp >> 48) as u8,
         (timestamp >> 56) as u8,
-        (address   >>  0) as u8,
-        (address   >>  8) as u8,
-    ];
+        (target    >>  0) as u8,
+    ]);
 
-    let mut data = [0; 16 * 4];
-    for (i, &word) in words.as_ref().iter().enumerate() {
-        let part = [
+    data
+}
+
+#[unwind(aborts)]
+extern fn dma_record_output(target: i32, word: i32) {
+    unsafe {
+        let timestamp = *(csr::rtio::NOW_HI_ADDR as *const i64);
+        let data = dma_record_output_prepare(timestamp, target, 1);
+        data.copy_from_slice(&[
             (word >>  0) as u8,
             (word >>  8) as u8,
             (word >> 16) as u8,
             (word >> 24) as u8,
-        ];
-        data[i * 4..(i + 1) * 4].copy_from_slice(&part[..]);
-    }
-    let data = &data[..words.len() * 4];
-
-    unsafe {
-        if DMA_RECORDER.buffer.len() - DMA_RECORDER.data_len < length {
-            dma_record_flush()
-        }
-        let dst = &mut DMA_RECORDER.buffer[DMA_RECORDER.data_len..
-                                           DMA_RECORDER.data_len + length];
-        dst[..header_length].copy_from_slice(&header[..]);
-        dst[header_length..].copy_from_slice(&data[..]);
-        DMA_RECORDER.data_len += length;
+        ]);
     }
 }
 
+#[unwind(aborts)]
+extern fn dma_record_output_wide(target: i32, words: CSlice<i32>) {
+    assert!(words.len() <= 16); // enforce the hardware limit
+
+    unsafe {
+        let timestamp = *(csr::rtio::NOW_HI_ADDR as *const i64);
+        let mut data = dma_record_output_prepare(timestamp, target, words.len());
+        for word in words.as_ref().iter() {
+            data[..4].copy_from_slice(&[
+                (word >>  0) as u8,
+                (word >>  8) as u8,
+                (word >> 16) as u8,
+                (word >> 24) as u8,
+            ]);
+            data = &mut data[4..];
+        }
+    }
+}
+
+#[unwind(aborts)]
 extern fn dma_erase(name: CSlice<u8>) {
     let name = str::from_utf8(name.as_ref()).unwrap();
 
@@ -346,6 +382,7 @@ struct DmaTrace {
     address:  i32,
 }
 
+#[unwind(allowed)]
 extern fn dma_retrieve(name: CSlice<u8>) -> DmaTrace {
     let name = str::from_utf8(name.as_ref()).unwrap();
 
@@ -365,7 +402,8 @@ extern fn dma_retrieve(name: CSlice<u8>) -> DmaTrace {
     })
 }
 
-#[cfg(has_rtio)]
+#[cfg(has_rtio_dma)]
+#[unwind(allowed)]
 extern fn dma_playback(timestamp: i64, ptr: i32) {
     assert!(ptr % 64 == 0);
 
@@ -389,17 +427,18 @@ extern fn dma_playback(timestamp: i64, ptr: i32) {
                     timestamp as i64, channel as i64, 0);
             }
             if error & 2 != 0 {
-                raise!("RTIOLinkError",
-                    "RTIO output link error at {0} mu, channel {1}",
+                raise!("RTIODestinationUnreachable",
+                    "RTIO destination unreachable, output, at {0} mu, channel {1}",
                     timestamp as i64, channel as i64, 0);
             }
         }
     }
 }
 
-#[cfg(not(has_rtio))]
-extern fn dma_playback(timestamp: i64, ptr: i32) {
-    unimplemented!("not(has_rtio)")
+#[cfg(not(has_rtio_dma))]
+#[unwind(allowed)]
+extern fn dma_playback(_timestamp: i64, _ptr: i32) {
+    unimplemented!("not(has_rtio_dma)")
 }
 
 unsafe fn attribute_writeback(typeinfo: *const ()) {
@@ -469,14 +508,24 @@ pub unsafe fn main() {
 
     ptr::write_bytes(__bss_start as *mut u8, 0, (_end - __bss_start) as usize);
 
-    send(&NowInitRequest);
-    recv!(&NowInitReply(now) => NOW = now);
     (mem::transmute::<u32, fn()>(__modinit__))();
-    send(&NowSave(NOW));
 
     if let Some(typeinfo) = typeinfo {
         attribute_writeback(typeinfo as *const ());
     }
+
+    // Make sure all async RPCs are processed before exiting.
+    // Otherwise, if the comms and kernel CPU run in the following sequence:
+    //
+    //    comms                     kernel
+    //    -----------------------   -----------------------
+    //    check for async RPC
+    //                              post async RPC
+    //                              post RunFinished
+    //    check for mailbox
+    //
+    // the async RPC would be missed.
+    send(&RpcFlush);
 
     send(&RunFinished);
 
@@ -484,11 +533,13 @@ pub unsafe fn main() {
 }
 
 #[no_mangle]
+#[unwind(allowed)]
 pub extern fn exception(vect: u32, _regs: *const u32, pc: u32, ea: u32) {
     panic!("exception {:?} at PC 0x{:x}, EA 0x{:x}", vect, pc, ea)
 }
 
 #[no_mangle]
+#[unwind(allowed)]
 pub extern fn abort() {
     panic!("aborted")
 }

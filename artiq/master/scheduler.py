@@ -214,7 +214,7 @@ class PrepareStage(TaskObject):
                         if run.worker.closed.is_set():
                             break
                     if run.worker.closed.is_set():
-                            continue
+                        continue
                 run.status = RunStatus.preparing
                 try:
                     await run.build()
@@ -442,8 +442,10 @@ class Scheduler:
 
     def get_status(self):
         """Returns a dictionary containing information about the runs currently
-        tracked by the scheduler."""
-        return self.notifier.read
+        tracked by the scheduler.
+
+        Must not be modified."""
+        return self.notifier.raw_view
 
     def check_pause(self, rid):
         """Returns ``True`` if there is a condition that could make ``pause``

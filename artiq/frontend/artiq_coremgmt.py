@@ -3,9 +3,8 @@
 import argparse
 import struct
 
-from artiq.tools import verbosity_args, init_logger
+from artiq.tools import add_common_args, init_logger
 from artiq.master.databases import DeviceDB
-from artiq.master.worker_db import DeviceManager
 from artiq.coredevice.comm_kernel import CommKernel
 from artiq.coredevice.comm_mgmt import CommMgmt
 from artiq.coredevice.profiler import CallgrindWriter
@@ -15,9 +14,12 @@ def get_argparser():
     parser = argparse.ArgumentParser(description="ARTIQ core device "
                                                  "management tool")
 
-    verbosity_args(parser)
+    add_common_args(parser)
     parser.add_argument("--device-db", default="device_db.py",
                        help="device database file (default: '%(default)s')")
+    parser.add_argument("-D", "--device", default=None,
+                        help="use specified core device address instead of "
+                             "reading device database")
 
     tools = parser.add_subparsers(dest="tool")
     tools.required = True
@@ -134,67 +136,66 @@ def main():
     args = get_argparser().parse_args()
     init_logger(args)
 
-    device_mgr = DeviceManager(DeviceDB(args.device_db))
-    try:
+    if args.device is None:
         core_addr = DeviceDB(args.device_db).get("core")["arguments"]["host"]
-        mgmt = CommMgmt(core_addr)
+    else:
+        core_addr = args.device
+    mgmt = CommMgmt(core_addr)
 
-        if args.tool == "log":
-            if args.action == "set_level":
-                mgmt.set_log_level(args.level)
-            if args.action == "set_uart_level":
-                mgmt.set_uart_log_level(args.level)
-            if args.action == "clear":
-                mgmt.clear_log()
-            if args.action == None:
-                print(mgmt.get_log(), end="")
+    if args.tool == "log":
+        if args.action == "set_level":
+            mgmt.set_log_level(args.level)
+        if args.action == "set_uart_level":
+            mgmt.set_uart_log_level(args.level)
+        if args.action == "clear":
+            mgmt.clear_log()
+        if args.action == None:
+            print(mgmt.get_log(), end="")
 
-        if args.tool == "config":
-            if args.action == "read":
-                value = mgmt.config_read(args.key)
-                if not value:
-                    print("Key {} does not exist".format(args.key))
-                else:
-                    print(value)
-            if args.action == "write":
-                for key, value in args.string:
-                    mgmt.config_write(key, value.encode("utf-8"))
-                for key, filename in args.file:
-                    with open(filename, "rb") as fi:
-                        mgmt.config_write(key, fi.read())
-            if args.action == "remove":
-                for key in args.key:
-                    mgmt.config_remove(key)
-            if args.action == "erase":
-                mgmt.config_erase()
+    if args.tool == "config":
+        if args.action == "read":
+            value = mgmt.config_read(args.key)
+            if not value:
+                print("Key {} does not exist".format(args.key))
+            else:
+                print(value)
+        if args.action == "write":
+            for key, value in args.string:
+                mgmt.config_write(key, value.encode("utf-8"))
+            for key, filename in args.file:
+                with open(filename, "rb") as fi:
+                    mgmt.config_write(key, fi.read())
+        if args.action == "remove":
+            for key in args.key:
+                mgmt.config_remove(key)
+        if args.action == "erase":
+            mgmt.config_erase()
 
-        if args.tool == "reboot":
-            mgmt.reboot()
+    if args.tool == "reboot":
+        mgmt.reboot()
 
-        if args.tool == "hotswap":
-            mgmt.hotswap(args.image.read())
+    if args.tool == "hotswap":
+        mgmt.hotswap(args.image.read())
 
-        if args.tool == "profile":
-            if args.action == "start":
-                mgmt.start_profiler(args.interval, args.hits_size, args.edges_size)
-            elif args.action == "stop":
-                mgmt.stop_profiler()
-            elif args.action == "save":
-                hits, edges = mgmt.get_profile()
-                writer = CallgrindWriter(args.output, args.firmware, "or1k-linux",
-                                         args.compression, args.demangle)
-                writer.header()
-                for addr, count in hits.items():
-                    writer.hit(addr, count)
-                for (caller, callee), count in edges.items():
-                    writer.edge(caller, callee, count)
+    if args.tool == "profile":
+        if args.action == "start":
+            mgmt.start_profiler(args.interval, args.hits_size, args.edges_size)
+        elif args.action == "stop":
+            mgmt.stop_profiler()
+        elif args.action == "save":
+            hits, edges = mgmt.get_profile()
+            writer = CallgrindWriter(args.output, args.firmware, "or1k-linux",
+                                     args.compression, args.demangle)
+            writer.header()
+            for addr, count in hits.items():
+                writer.hit(addr, count)
+            for (caller, callee), count in edges.items():
+                writer.edge(caller, callee, count)
 
-        if args.tool == "debug":
-            if args.action == "allocator":
-                mgmt.debug_allocator()
+    if args.tool == "debug":
+        if args.action == "allocator":
+            mgmt.debug_allocator()
 
-    finally:
-        device_mgr.close_devices()
 
 if __name__ == "__main__":
     main()

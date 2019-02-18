@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(lang_items)]
+#![feature(panic_implementation, panic_info_message)]
 
 extern crate crc;
 extern crate byteorder;
@@ -129,17 +129,23 @@ fn flash_boot() {
     }
 
     let firmware_in_flash = unsafe { slice::from_raw_parts(FIRMWARE.offset(8), length) };
-    let actual_crc = crc32::checksum_ieee(firmware_in_flash);
+    let actual_crc_flash = crc32::checksum_ieee(firmware_in_flash);
 
-    if actual_crc == expected_crc {
+    if actual_crc_flash == expected_crc {
         let firmware_in_sdram = unsafe { slice::from_raw_parts_mut(MAIN_RAM, length) };
         firmware_in_sdram.copy_from_slice(firmware_in_flash);
 
-        println!("Starting firmware.");
-        unsafe { boot::jump(MAIN_RAM as usize) }
+        let actual_crc_sdram = crc32::checksum_ieee(firmware_in_sdram);
+        if actual_crc_sdram == expected_crc {
+            println!("Starting firmware.");
+            unsafe { boot::jump(MAIN_RAM as usize) }
+        } else {
+            println!("Firmware CRC failed in SDRAM (actual {:08x}, expected {:08x})",
+                     actual_crc_sdram, expected_crc);
+        }
     } else {
-        println!("Firmware CRC failed (actual {:08x}, expected {:08x})",
-                 actual_crc, expected_crc);
+        println!("Firmware CRC failed in flash (actual {:08x}, expected {:08x})",
+                 actual_crc_flash, expected_crc);
     }
 }
 
@@ -182,7 +188,8 @@ fn network_boot() {
     println!("Waiting for connections...");
 
     loop {
-        match interface.poll(&mut sockets, clock::get_ms()) {
+        let timestamp = smoltcp::time::Instant::from_millis(clock::get_ms() as i64);
+        match interface.poll(&mut sockets, timestamp) {
             Ok(_) => (),
             Err(smoltcp::Error::Unrecognized) => (),
             Err(err) => println!("Network error: {}", err)
@@ -200,7 +207,7 @@ pub extern fn main() -> i32 {
     println!(r"|_|  |_|_|____/ \___/ \____|");
     println!("");
     println!("MiSoC Bootloader");
-    println!("Copyright (c) 2017-2018 M-Labs Limited");
+    println!("Copyright (c) 2017-2019 M-Labs Limited");
     println!("");
 
     if startup() {
@@ -226,10 +233,18 @@ pub extern fn abort() {
     loop {}
 }
 
-#[no_mangle]
-#[lang = "panic_fmt"]
-pub extern fn panic_fmt(args: core::fmt::Arguments, file: &'static str,
-                        line: u32, column: u32) -> ! {
-    println!("panic at {}:{}:{}: {}", file, line, column, args);
+#[no_mangle] // https://github.com/rust-lang/rust/issues/{38281,51647}
+#[panic_implementation]
+pub fn panic_fmt(info: &core::panic::PanicInfo) -> ! {
+    if let Some(location) = info.location() {
+        print!("panic at {}:{}:{}", location.file(), location.line(), location.column());
+    } else {
+        print!("panic at unknown location");
+    }
+    if let Some(message) = info.message() {
+        println!(": {}", message);
+    } else {
+        println!("");
+    }
     loop {}
 }

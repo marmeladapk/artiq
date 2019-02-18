@@ -10,6 +10,7 @@ from artiq.coredevice.runtime import source_loader
 ZeroDivisionError = builtins.ZeroDivisionError
 ValueError = builtins.ValueError
 IndexError = builtins.IndexError
+RuntimeError = builtins.RuntimeError
 
 
 class CoreException:
@@ -90,7 +91,7 @@ class RTIOOverflow(Exception):
     artiq_builtin = True
 
 
-class RTIOLinkError(Exception):
+class RTIODestinationUnreachable(Exception):
     """Raised with a RTIO operation could not be completed due to a DRTIO link
     being down.
     """

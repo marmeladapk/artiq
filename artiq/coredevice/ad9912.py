@@ -1,7 +1,7 @@
 from numpy import int32, int64
 
 from artiq.language.core import kernel, delay, portable
-from artiq.language.units import us, ns
+from artiq.language.units import ms, us, ns
 from artiq.coredevice.ad9912_reg import *
 
 from artiq.coredevice import spi2 as spi
@@ -21,14 +21,14 @@ class AD9912:
     :param sw_device: Name of the RF switch device. The RF switch is a
         TTLOut channel available as the :attr:`sw` attribute of this instance.
     :param pll_n: DDS PLL multiplier. The DDS sample clock is
-        f_ref*pll_n where f_ref is the reference frequency (set in the parent
-        Urukul CPLD instance).
+        f_ref/clk_div*pll_n where f_ref is the reference frequency and clk_div
+        is the reference clock divider (both set in the parent Urukul CPLD
+        instance).
     """
-    kernel_invariants = {"chip_select", "cpld", "core", "bus",
-            "ftw_per_hz", "sysclk", "pll_n"}
+    kernel_invariants = {"chip_select", "cpld", "core", "bus", "ftw_per_hz"}
 
     def __init__(self, dmgr, chip_select, cpld_device, sw_device=None,
-            pll_n=10):
+                 pll_n=10):
         self.cpld = dmgr.get(cpld_device)
         self.core = self.cpld.core
         self.bus = self.cpld.bus
@@ -38,9 +38,9 @@ class AD9912:
             self.sw = dmgr.get(sw_device)
             self.kernel_invariants.add("sw")
         self.pll_n = pll_n
-        self.sysclk = self.cpld.refclk*pll_n
-        assert self.sysclk <= 1e9
-        self.ftw_per_hz = 1/self.sysclk*(int64(1) << 48)
+        sysclk = self.cpld.refclk/[1, 1, 2, 4][self.cpld.clk_div]*pll_n
+        assert sysclk <= 1e9
+        self.ftw_per_hz = 1/sysclk*(int64(1) << 48)
 
     @kernel
     def write(self, addr, data, length):
@@ -107,6 +107,7 @@ class AD9912:
         # I_cp = 375 µA, VCO high range
         self.write(AD9912_PLLCFG, 0b00000101, length=1)
         self.cpld.io_update.pulse(2*us)
+        delay(1*ms)
 
     @kernel
     def set_att_mu(self, att):
@@ -158,11 +159,18 @@ class AD9912:
         return int64(round(self.ftw_per_hz*frequency))
 
     @portable(flags={"fast-math"})
+    def ftw_to_frequency(self, ftw):
+        """Returns the frequency corresponding to the given
+        frequency tuning word.
+        """
+        return ftw/self.ftw_per_hz
+
+    @portable(flags={"fast-math"})
     def turns_to_pow(self, phase):
         """Returns the phase offset word corresponding to the given
         phase.
         """
-        return int32(round((1 << 16)*phase))
+        return int32(round((1 << 14)*phase))
 
     @kernel
     def set(self, frequency, phase=0.0):
@@ -175,3 +183,13 @@ class AD9912:
         """
         self.set_mu(self.frequency_to_ftw(frequency),
             self.turns_to_pow(phase))
+
+    @kernel
+    def cfg_sw(self, state):
+        """Set CPLD CFG RF switch state. The RF switch is controlled by the
+        logical or of the CPLD configuration shift register
+        RF switch bit and the SW TTL line (if used).
+
+        :param state: CPLD CFG RF switch bit
+        """
+        self.cpld.cfg_sw(self.chip_select - 4, state)

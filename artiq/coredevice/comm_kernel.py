@@ -220,7 +220,7 @@ class CommKernel:
             raise UnsupportedDevice("Unsupported runtime ID: {}"
                                     .format(runtime_id))
 
-        gateware_version = self._read_string()
+        gateware_version = self._read_string().split(";")[0]
         if gateware_version != software_version and not self.warned_of_mismatch:
             logger.warning("Mismatch between gateware (%s) "
                            "and software (%s) versions",
@@ -403,7 +403,7 @@ class CommKernel:
             return msg
 
     def _serve_rpc(self, embedding_map):
-        async        = self._read_bool()
+        is_async     = self._read_bool()
         service_id   = self._read_int32()
         args, kwargs = self._receive_rpc_args(embedding_map)
         return_tags  = self._read_bytes()
@@ -413,9 +413,9 @@ class CommKernel:
         else:
             service  = embedding_map.retrieve_object(service_id)
         logger.debug("rpc service: [%d]%r%s %r %r -> %s", service_id, service,
-                     (" (async)" if async else ""), args, kwargs, return_tags)
+                     (" (async)" if is_async else ""), args, kwargs, return_tags)
 
-        if async:
+        if is_async:
             service(*args, **kwargs)
             return
 
@@ -447,7 +447,7 @@ class CommKernel:
                 self._write_string(function)
             else:
                 exn_type = type(exn)
-                if exn_type in (ZeroDivisionError, ValueError, IndexError) or \
+                if exn_type in (ZeroDivisionError, ValueError, IndexError, RuntimeError) or \
                         hasattr(exn, "artiq_builtin"):
                     self._write_string("0:{}".format(exn_type.__name__))
                 else:

@@ -151,11 +151,11 @@ unsafe fn send_value<W>(writer: &mut W, tag: Tag, data: &mut *const ())
             Ok(())
         }
         Tag::Keyword(it) => {
-            struct Keyword<'a> { name: CSlice<'a, u8>, contents: () };
+            struct Keyword<'a> { name: CSlice<'a, u8> };
             consume_value!(Keyword, |ptr| {
                 writer.write_string(str::from_utf8((*ptr).name.as_ref()).unwrap())?;
                 let tag = it.clone().next().expect("truncated tag");
-                let mut data = &(*ptr).contents as *const ();
+                let mut data = ptr.offset(1) as *const ();
                 send_value(writer, tag, &mut data)
             })
             // Tag::Keyword never appears in composite types, so we don't have
@@ -256,8 +256,8 @@ mod tag {
                 Tag::Int64 => 8,
                 Tag::Float64 => 8,
                 Tag::String => 4,
-                Tag::Bytes => 4,
-                Tag::ByteArray => 4,
+                Tag::Bytes => 8,
+                Tag::ByteArray => 8,
                 Tag::Tuple(it, arity) => {
                     let mut size = 0;
                     for _ in 0..arity {

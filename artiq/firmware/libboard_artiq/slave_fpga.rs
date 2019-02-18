@@ -1,4 +1,4 @@
-use board::{csr, clock};
+use board_misoc::{csr, clock};
 use core::slice;
 use byteorder::{ByteOrder, BigEndian};
 
@@ -30,23 +30,21 @@ pub fn load() -> Result<(), &'static str> {
     let header = unsafe { slice::from_raw_parts(GATEWARE, 8) };
 
     let magic = BigEndian::read_u32(&header[0..]);
-    info!("Magic: 0x{:08x}", magic);
+    let length = BigEndian::read_u32(&header[4..]) as usize;
+    info!("  magic: 0x{:08x}, length: 0x{:08x}", magic, length);
     if magic != 0x5352544d {  // "SRTM", see sayma_rtm target as well
         return Err("Bad magic");
     }
-
-    let length = BigEndian::read_u32(&header[4..]) as usize;
-    info!("Length: 0x{:08x}", length);
     if length > 0x220000 {
         return Err("Too large (corrupted?)");
     }
 
     unsafe {
         if csr::slave_fpga_cfg::in_read() & DONE_BIT != 0 {
-            info!("DONE before loading");
+            info!("  DONE before loading");
         }
         if csr::slave_fpga_cfg::in_read() & INIT_B_BIT == 0 {
-            info!("INIT asserted before loading");
+            info!("  INIT asserted before loading");
         }
 
         csr::slave_fpga_cfg::out_write(0);
@@ -60,6 +58,9 @@ pub fn load() -> Result<(), &'static str> {
         if csr::slave_fpga_cfg::in_read() & INIT_B_BIT == 0 {
             return Err("Did not exit INIT after releasing PROGRAM");
         }
+        if csr::slave_fpga_cfg::in_read() & DONE_BIT != 0 {
+            return Err("DONE high despite PROGRAM");
+        }
 
         for i in slice::from_raw_parts(GATEWARE.offset(8), length) {
             shift_u8(*i);
@@ -71,15 +72,15 @@ pub fn load() -> Result<(), &'static str> {
         let t = clock::get_ms();
         while csr::slave_fpga_cfg::in_read() & DONE_BIT == 0 {
             if clock::get_ms() > t + 100 {
-                error!("Timeout wating for DONE after loading");
-                error!("Boards not populated correctly?");
-                return Err("Not DONE");
+                return Err("Timeout wating for DONE after loading");
             }
             shift_u8(0xff);
         }
         shift_u8(0xff);  // "Compensate for Special Startup Conditions"
         csr::slave_fpga_cfg::out_write(PROGRAM_B_BIT);
+        csr::slave_fpga_cfg::oe_write(PROGRAM_B_BIT);
     }
 
+    info!("  ...done");
     Ok(())
 }

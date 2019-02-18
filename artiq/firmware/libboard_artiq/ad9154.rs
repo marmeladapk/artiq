@@ -1,6 +1,5 @@
 use board_misoc::{csr, clock};
 use ad9154_reg;
-use hmc830_7043::hmc7043;
 
 fn spi_setup(dacno: u8) {
     unsafe {
@@ -34,9 +33,9 @@ fn read(addr: u16) -> u8 {
     }
 }
 
-fn jesd_unreset() {
+pub fn jesd_reset(reset: bool) {
     unsafe {
-        csr::ad9154_crg::jreset_write(0)
+        csr::ad9154_crg::jreset_write(if reset { 1 }  else { 0 });
     }
 }
 
@@ -71,9 +70,9 @@ fn jesd_jsync(dacno: u8) -> bool {
 }
 
 // ad9154 mode 1
-// linerate 6Gbps
-// deviceclock_fpga=150MHz
-// deviceclock_dac=600MHz
+// linerate 5Gbps or 6Gbps
+// deviceclock_fpga 125MHz or 150MHz
+// deviceclock_dac 500MHz or 600MHz
 
 struct JESDSettings {
     did: u8,
@@ -152,8 +151,6 @@ fn dac_detect(dacno: u8) -> Result<(), &'static str> {
     spi_setup(dacno);
     if (read(ad9154_reg::PRODIDH) as u16) << 8 | (read(ad9154_reg::PRODIDL) as u16) != 0x9154 {
         return Err("invalid AD9154 identification");
-    } else {
-        info!("AD9154-{} found", dacno);
     }
     Ok(())
 }
@@ -167,7 +164,9 @@ fn dac_setup(dacno: u8, linerate: u64) -> Result<(), &'static str> {
             0*ad9154_reg::PD_BG);
     clock::spin_us(100);
     write(ad9154_reg::TXENMASK1, 0*ad9154_reg::DACA_MASK |
-            0*ad9154_reg::DACB_MASK); // TX not controlled by TXEN pins
+            0*ad9154_reg::DACB_MASK); // DAC PD not controlled by TXEN pins
+    write(ad9154_reg::PWRCNTRL3, 1*ad9154_reg::ENA_SPI_TXEN |
+            1*ad9154_reg::SPI_TXEN);
     write(ad9154_reg::CLKCFG0,
             0*ad9154_reg::REF_CLKDIV_EN | 1*ad9154_reg::RF_SYNC_EN |
             1*ad9154_reg::DUTY_EN | 0*ad9154_reg::PD_CLK_REC |
@@ -185,7 +184,7 @@ fn dac_setup(dacno: u8, linerate: u64) -> Result<(), &'static str> {
 
     write(ad9154_reg::SPI_PAGEINDX, 0x3); // A and B dual
 
-    write(ad9154_reg::INTERP_MODE, 0); // 1x
+    write(ad9154_reg::INTERP_MODE, 0x03); // 4x
     write(ad9154_reg::MIX_MODE, 0);
     write(ad9154_reg::DATA_FORMAT, 0*ad9154_reg::BINARY_FORMAT); // s16
     write(ad9154_reg::DATAPATH_CTRL,
@@ -370,28 +369,12 @@ fn dac_setup(dacno: u8, linerate: u64) -> Result<(), &'static str> {
     write(ad9154_reg::LMFC_VAR_0, 0x0a); // receive buffer delay
     write(ad9154_reg::LMFC_VAR_1, 0x0a);
     write(ad9154_reg::SYNC_ERRWINDOW, 0); // +- 1/2 DAC clock
+    // datasheet seems to say ENABLE and ARM should be separate steps,
+    // so enable now so it can be armed in dac_sync().
     write(ad9154_reg::SYNC_CONTROL,
-            0x9*ad9154_reg::SYNCMODE | 0*ad9154_reg::SYNCENABLE |
-            0*ad9154_reg::SYNCARM | 1*ad9154_reg::SYNCCLRSTKY |
-            1*ad9154_reg::SYNCCLRLAST);
-    write(ad9154_reg::SYNC_CONTROL,
-            0x9*ad9154_reg::SYNCMODE | 1*ad9154_reg::SYNCENABLE |
-            0*ad9154_reg::SYNCARM | 1*ad9154_reg::SYNCCLRSTKY |
-            1*ad9154_reg::SYNCCLRLAST);
-    write(ad9154_reg::SYNC_CONTROL,
-            0x9*ad9154_reg::SYNCMODE | 1*ad9154_reg::SYNCENABLE |
-            1*ad9154_reg::SYNCARM | 0*ad9154_reg::SYNCCLRSTKY |
-            0*ad9154_reg::SYNCCLRLAST);
-    clock::spin_us(1000); // ensure at least one sysref edge
-    if read(ad9154_reg::SYNC_CONTROL) & ad9154_reg::SYNCARM != 0 {
-        return Err("no sysref edge");
-    }
-    if read(ad9154_reg::SYNC_STATUS) & ad9154_reg::SYNC_LOCK == 0 {
-        return Err("no sync lock");
-    }
-    if read(ad9154_reg::SYNC_STATUS) & ad9154_reg::SYNC_WLIM != 0 {
-        return Err("sysref phase error");
-    }
+        0x1*ad9154_reg::SYNCMODE | 1*ad9154_reg::SYNCENABLE |
+        0*ad9154_reg::SYNCARM | 0*ad9154_reg::SYNCCLRSTKY);
+
     write(ad9154_reg::XBAR_LN_0_1,
             0*ad9154_reg::LOGICAL_LANE0_SRC | 1*ad9154_reg::LOGICAL_LANE1_SRC);
     write(ad9154_reg::XBAR_LN_2_3,
@@ -573,14 +556,77 @@ fn dac_prbs(dacno: u8) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn dac_stpl(dacno: u8, m: u8, s: u8) -> Result<(), &'static str> {
+    spi_setup(dacno);
+
+    info!("AD9154-{} running STPL test...", dacno);
+
+    fn prng(seed: u32) -> u32 {
+        return ((seed + 1)*0x31415979 + 1) & 0xffff;
+    }
+
+    jesd_stpl(dacno, true);
+    for i in 0..m {
+        let mut data: u32;
+        let mut errors: u8 = 0;
+        for j in 0..s {
+            /* select converter */
+            write(ad9154_reg::SHORT_TPL_TEST_0,
+                0b0*ad9154_reg::SHORT_TPL_TEST_EN |
+                0b0*ad9154_reg::SHORT_TPL_TEST_RESET |
+                i*ad9154_reg::SHORT_TPL_DAC_SEL |
+                j*ad9154_reg::SHORT_TPL_SP_SEL);
+
+            /* set expected value */
+            data = prng(((i as u32) << 8) | (j as u32));
+            write(ad9154_reg::SHORT_TPL_TEST_1, (data & 0x00ff) as u8);
+            write(ad9154_reg::SHORT_TPL_TEST_2, ((data & 0xff00) >> 8) as u8);
+
+            /* enable stpl */
+            write(ad9154_reg::SHORT_TPL_TEST_0,
+                0b1*ad9154_reg::SHORT_TPL_TEST_EN |
+                0b0*ad9154_reg::SHORT_TPL_TEST_RESET |
+                i*ad9154_reg::SHORT_TPL_DAC_SEL |
+                j*ad9154_reg::SHORT_TPL_SP_SEL);
+
+            /* reset stpl */
+            write(ad9154_reg::SHORT_TPL_TEST_0,
+                0b1*ad9154_reg::SHORT_TPL_TEST_EN |
+                0b1*ad9154_reg::SHORT_TPL_TEST_RESET |
+                i*ad9154_reg::SHORT_TPL_DAC_SEL |
+                j*ad9154_reg::SHORT_TPL_SP_SEL);
+
+            /* release reset stpl */
+            write(ad9154_reg::SHORT_TPL_TEST_0,
+                0b1*ad9154_reg::SHORT_TPL_TEST_EN |
+                0b0*ad9154_reg::SHORT_TPL_TEST_RESET |
+                i*ad9154_reg::SHORT_TPL_DAC_SEL |
+                j*ad9154_reg::SHORT_TPL_SP_SEL);
+            errors += read(ad9154_reg::SHORT_TPL_TEST_3);
+        }
+        info!("  c{} errors: {}", i, errors);
+        if errors > 0 {
+            return Err("STPL failed")
+        }
+    }
+    jesd_stpl(dacno, false);
+    info!("  ...passed");
+    Ok(())
+}
+
 fn dac_cfg(dacno: u8) -> Result<(), &'static str> {
+    #[cfg(rtio_frequency = "125.0")]
+    const LINERATE: u64 = 5_000_000_000;
+    #[cfg(rtio_frequency = "150.0")]
+    const LINERATE: u64 = 5_000_000_000;
+
     spi_setup(dacno);
     jesd_enable(dacno, false);
     jesd_prbs(dacno, false);
     jesd_stpl(dacno, false);
     clock::spin_us(10000);
     jesd_enable(dacno, true);
-    dac_setup(dacno, 6_000_000_000)?;
+    dac_setup(dacno, LINERATE)?;
     jesd_enable(dacno, false);
     clock::spin_us(10000);
     jesd_enable(dacno, true);
@@ -611,73 +657,72 @@ fn dac_cfg(dacno: u8) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn dac_cfg_retry(dacno: u8) -> Result<(), &'static str> {
-    for i in 0..99 {
+fn dac_cfg_and_test(dacno: u8) -> Result<(), &'static str> {
+    dac_cfg(dacno)?;
+    dac_prbs(dacno)?;
+    dac_stpl(dacno, 4, 2)?;
+    dac_cfg(dacno)?;
+    Ok(())
+}
+
+/*
+ * work around for:
+ * https://github.com/m-labs/artiq/issues/727
+ * https://github.com/m-labs/artiq/issues/1127
+ */
+fn dac_cfg_and_test_retry(dacno: u8) -> Result<(), &'static str> {
+    let mut attempt =  0;
+    loop {
+        attempt += 1;
         dac_reset(dacno);
-        let outcome = dac_cfg(dacno);
+        let outcome = dac_cfg_and_test(dacno);
         match outcome {
             Ok(_) => return outcome,
-            Err(e) => warn!("AD9154-{} config attempt #{} failed ({}), retrying", dacno, i, e)
-        }
-    }
-    dac_cfg(dacno)
-}
-
-fn dac_sysref_scan(dacno: u8) {
-    let mut sync_error_last = 0;
-    let mut phase_min = None;
-    let mut phase_max = None;
-
-    info!("AD9154-{} SYSREF scan:", dacno);
-    for phase in 0..512 {
-        hmc7043::cfg_dac_sysref(dacno, phase);
-        clock::spin_us(10000);
-        spi_setup(dacno);
-        let sync_error = ((read(ad9154_reg::SYNC_CURRERR_L) as u16) |
-                         ((read(ad9154_reg::SYNC_CURRERR_H) as u16) << 8))
-                         & 0x1ff;
-        if sync_error != sync_error_last {
-            info!("  phase: {}, sync error: {}", phase, sync_error);
-        }
-        if sync_error != 0 {
-            if phase_min.is_some() {
-                if sync_error != sync_error_last {
-                    phase_max = Some(phase - 1);
-                    break;
+            Err(e) => {
+                warn!("AD9154-{} config attempt #{} failed ({})", dacno, attempt, e);
+                if attempt >= 10 {
+                    return outcome;
                 }
-            } else {
-                phase_min = Some(phase);
             }
         }
-        sync_error_last = sync_error;
     }
-
-    info!("  phase min: {:?}, phase max: {:?}", phase_min, phase_max);
 }
 
-fn dac_sysref_cfg(dacno: u8, phase: u16) {
-    info!("AD9154-{} setting SYSREF phase to {}", dacno, phase);
-    hmc7043::cfg_dac_sysref(dacno, phase);
+pub fn dac_sync(dacno: u8) -> Result<bool, &'static str> {
+    spi_setup(dacno);
+
+    write(ad9154_reg::SYNC_CONTROL,
+        0x1*ad9154_reg::SYNCMODE | 1*ad9154_reg::SYNCENABLE |
+        1*ad9154_reg::SYNCARM | 1*ad9154_reg::SYNCCLRSTKY);
+    clock::spin_us(1000); // ensure at least one sysref edge
+    let sync_status = read(ad9154_reg::SYNC_STATUS);
+
+    if sync_status & ad9154_reg::SYNC_BUSY != 0 {
+        return Err("sync logic busy");
+    }
+    if sync_status & ad9154_reg::SYNC_LOCK == 0 {
+        return Err("no sync lock");
+    }
+    if sync_status & ad9154_reg::SYNC_TRIP == 0 {
+        return Err("no sysref edge");
+    }
+    let realign_occured = sync_status & ad9154_reg::SYNC_ROTATE != 0;
+    Ok(realign_occured)
 }
 
-pub fn init() -> Result<(), &'static str> {
-    // Release the JESD clock domain reset late, as we need to
-    // set up clock chips before.
-    jesd_unreset();
-
-    for dacno in 0..csr::AD9154.len() {
-        let dacno = dacno as u8;
-        // Reset the DAC, detect and configure it
-        dac_reset(dacno);
-        dac_detect(dacno)?;
-        dac_cfg_retry(dacno)?;
-        // Run the PRBS and SYSREF scan tests
-        dac_prbs(dacno)?;
-        dac_sysref_scan(dacno);
-        // Set SYSREF phase and reconfigure the DAC
-        dac_sysref_cfg(dacno, 88);
-        dac_cfg_retry(dacno)?;
-    }
-
+fn init_dac(dacno: u8) -> Result<(), &'static str> {
+    let dacno = dacno as u8;
+    dac_reset(dacno);
+    dac_detect(dacno)?;
+    dac_cfg_and_test_retry(dacno)?;
     Ok(())
+}
+
+pub fn init() {
+    for dacno in 0..csr::AD9154.len() {
+        match init_dac(dacno as u8) {
+            Ok(_) => (),
+            Err(e) => error!("failed to initialize AD9154-{}: {}", dacno, e)
+        }
+    }
 }

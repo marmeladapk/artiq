@@ -21,11 +21,10 @@ class CreateTTLPulse(EnvExperiment):
     def run(self):
         self.core.break_realtime()
         with parallel:
-            self.loop_in.gate_both_mu(1200)
             with sequential:
                 delay_mu(100)
                 self.loop_out.pulse_mu(1000)
-        self.loop_in.count()
+            self.loop_in.count(self.loop_in.gate_both_mu(1200))
 
 
 class WriteLog(EnvExperiment):
@@ -59,9 +58,10 @@ class AnalyzerTest(ExperimentCase):
         input_messages = [msg for msg in dump.messages
                           if isinstance(msg, InputMessage)]
         self.assertEqual(len(input_messages), 2)
+        # on Kasli systems, this has to go through the isolated DIO card
         self.assertAlmostEqual(
             abs(input_messages[0].timestamp - input_messages[1].timestamp),
-            1000, delta=1)
+            1000, delta=4)
 
     def test_rtio_log(self):
         core_host = self.device_mgr.get_desc("core")["arguments"]["host"]

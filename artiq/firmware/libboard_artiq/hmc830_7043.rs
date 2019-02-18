@@ -1,55 +1,24 @@
-/*
- * HMC830 config:
- * 100MHz input, 1.2GHz output
- * fvco = (refclk / r_divider) * n_divider
- * fout = fvco/2
- *
- * HMC7043 config:
- * dac clock: 600MHz (div=2)
- * fpga clock: 150MHz (div=8)
- * sysref clock: 9.375MHz (div=128)
- */
-
 mod clock_mux {
     use board_misoc::csr;
 
     const CLK_SRC_EXT_SEL : u8 = 1 << 0;
     const REF_CLK_SRC_SEL : u8 = 1 << 1;
     const DAC_CLK_SRC_SEL : u8 = 1 << 2;
+    const REF_LO_CLK_SEL  : u8 = 1 << 3;
 
     pub fn init() {
         unsafe {
             csr::clock_mux::out_write(
-                1*CLK_SRC_EXT_SEL |  // use ext clk from sma
-                1*REF_CLK_SRC_SEL |
-                1*DAC_CLK_SRC_SEL);
+                1*CLK_SRC_EXT_SEL |  // 1= ext clk from sma, 0= RF backplane (IC46) to IC45
+                1*REF_CLK_SRC_SEL |  // 1= low-noise clock, 0= Si5324 output (IC45) to HMC830
+                1*DAC_CLK_SRC_SEL |  // 1= HMC830 output, 1= clock mezzanine (IC54) to HMC7043 and J58/J59
+                0*REF_LO_CLK_SEL);   // 1= clock mezzanine, 0= HMC830 input  (IC52) to AFEs and J56/J57
         }
     }
 }
 
 mod hmc830 {
     use board_misoc::{csr, clock};
-
-    const HMC830_WRITES: [(u8, u32); 18] = [
-        (0x0, 0x20),
-        (0x1, 0x2),
-        (0x2, 0x2), // r_divider
-        (0x5, 0x1628),
-        (0x5, 0x60a0),
-        (0x5, 0xe110),
-        (0x5, 0x2818),
-        (0x5, 0xf88),
-        (0x5, 0x7fb0),
-        (0x5, 0x0),
-        (0x6, 0x303ca),
-        (0x7, 0x14d),
-        (0x8, 0xc1beff),
-        (0x9, 0x153fff),
-        (0xa, 0x2046),
-        (0xb, 0x7c061),
-        (0xf, 0x81),
-        (0x3, 0x30), // n_divider
-    ];
 
     fn spi_setup() {
         unsafe {
@@ -105,26 +74,73 @@ mod hmc830 {
         if id != 0xa7975 {
             error!("invalid HMC830 ID: 0x{:08x}", id);
             return Err("invalid HMC830 identification");
-        } else {
-            info!("HMC830 found");
         }
 
         Ok(())
     }
 
-    pub fn init() -> Result<(), &'static str> {
+    pub fn init() {
+        // Configure HMC830 for integer-N operation
+        // See "PLLs with integrated VCO- RF Applications Product & Operating
+        // Guide"
         spi_setup();
-        info!("loading configuration...");
-        for &(addr, data) in HMC830_WRITES.iter() {
-            write(addr, data);
-        }
-        info!("  ...done");
+        info!("loading HMC830 configuration...");
 
+        write(0x0, 0x20);    // software reset
+        write(0x0, 0x00);    // normal operation
+        write(0x6, 0x307ca); // integer-N mode (NB data sheet table 5.8 not self-consistent)
+        write(0x7, 0x4d);    // digital lock detect, 1/2 cycle window (6.5ns window)
+        write(0x9, 0x2850);  // charge pump: 1.6mA, no offset
+        write(0xa, 0x2045);  // for wideband devices like the HMC830
+        write(0xb, 0x7c061); // for HMC830
+
+        // VCO subsystem registers
+        // NB software reset does not seem to reset these registers, so always
+        // program them all!
+        write(0x5, 0xf88);   // 1: defaults
+        write(0x5, 0x6010);  // 2: mute output until output divider set
+        write(0x5, 0x2818);  // 3: wideband PLL defaults
+        write(0x5, 0x60a0);  // 4: HMC830 magic value
+        write(0x5, 0x1628);  // 5: HMC830 magic value
+        write(0x5, 0x7fb0);  // 6: HMC830 magic value
+        write(0x5, 0x0);     // ready for VCO auto-cal
+
+        info!("  ...done");
+    }
+
+    pub fn set_dividers(r_div: u32, n_div: u32, m_div: u32, out_div: u32) {
+        // VCO frequency: f_vco = (f_ref/r_div)*(n_int + n_frac/2**24)
+        // VCO frequency range [1.5GHz, 3GHz]
+        // Output frequency: f_out = f_vco/out_div
+        // Max PFD frequency: 125MHz for integer-N, 100MHz for fractional
+        // (mode B)
+        // Max reference frequency: 350MHz, however f_ref >= 200MHz requires
+        //     setting 0x08[21]=1
+        //
+        // Warning: Output divider is not synchronized! Set to 1 for deterministic
+        // phase at the output.
+        //
+        // :param r_div: reference divider [1, 16383]
+        // :param n_div: VCO divider, integer part. Integer-N mode: [16, 2**19-1]
+        //    fractional mode: [20, 2**19-4]
+        // :param m_div: VCO divider, fractional part [0, 2**24-1]
+        // :param out_div: output divider [1, 62] (0 mutes output)
+        info!("setting HMC830 dividers...");
+        write(0x5, 0x6010 + (out_div << 7) + (((out_div <= 2) as u32) << 15));
+        write(0x5, 0x0);     // ready for VCO auto-cal
+        write(0x2, r_div);
+        write(0x4, m_div);
+        write(0x3, n_div);
+
+        info!("  ...done");
+    }
+
+    pub fn check_locked() -> Result<(), &'static str> {
+        info!("waiting for HMC830 lock...");
         let t = clock::get_ms();
-        info!("waiting for lock...");
         while read(0x12) & 0x02 == 0 {
             if clock::get_ms() > t + 2000 {
-                error!("  lock timeout. Register dump:");
+                error!("lock timeout. Register dump:");
                 for addr in 0x00..0x14 {
                     // These registers don't exist (in the data sheet at least)
                     if addr == 0x0d || addr == 0x0e { continue; }
@@ -140,31 +156,35 @@ mod hmc830 {
 }
 
 pub mod hmc7043 {
-    use board_misoc::csr;
+    use board_misoc::{csr, clock};
 
-    // To do: check which output channels we actually need
-    const DAC_CLK_DIV: u32 = 2;
-    const FPGA_CLK_DIV: u32 = 8;
-    const SYSREF_DIV: u32 = 128;
+    pub const ANALOG_DELAY_RANGE: u8 = 24;
 
-    // enabled, divider, analog phase shift, digital phase shift
-    const OUTPUT_CONFIG: [(bool, u32, u8, u8); 14] = [
-        (true, DAC_CLK_DIV, 0x0, 0x0),  // 0: DAC2_CLK
-        (true, SYSREF_DIV, 0x0, 0x0),   // 1: DAC2_SYSREF
-        (true, DAC_CLK_DIV, 0x0, 0x0),  // 2: DAC1_CLK
-        (true, SYSREF_DIV, 0x0, 0x0),   // 3: DAC1_SYSREF
-        (false, 0, 0x0, 0x0),           // 4: ADC2_CLK
-        (false, 0, 0x0, 0x0),           // 5: ADC2_SYSREF
-        (true, FPGA_CLK_DIV, 0x0, 0x0), // 6: GTP_CLK2
-        (true, SYSREF_DIV, 0x0, 0x0),   // 7: FPGA_DAC_SYSREF
-        (true, FPGA_CLK_DIV, 0x0, 0x0), // 8: GTP_CLK1
-        (true, FPGA_CLK_DIV, 0x0, 0x0), // 9: AMC_MASTER_AUX_CLK
-        (true, FPGA_CLK_DIV, 0x0, 0x0), // 10: RTM_MASTER_AUX_CLK
-        (false, 0, 0x0, 0x0),           // 11: FPGA_ADC_SYSREF
-        (false, 0, 0x0, 0x0),           // 12: ADC1_CLK
-        (false, 0, 0x0, 0x0),           // 13: ADC1_SYSREF
-        ];
+    // Warning: dividers are not synchronized with HMC830 clock input!
+    // Set DAC_CLK_DIV to 1 or 0 for deterministic phase.
+    // (0 bypasses the divider and reduces noise)
+    pub const DAC_CLK_DIV: u16 = 0;
+    pub const FPGA_CLK_DIV: u16 = 16;
+    pub const SYSREF_DIV: u16 = 256;
+    const HMC_SYSREF_DIV: u16 = SYSREF_DIV*8; // must be <= 4MHz
 
+    // enabled, divider, output config
+    const OUTPUT_CONFIG: [(bool, u16, u8, bool); 14] = [
+        (true,  DAC_CLK_DIV,  0x08, false),  // 0: DAC2_CLK
+        (true,  SYSREF_DIV,   0x08, true),   // 1: DAC2_SYSREF
+        (true,  DAC_CLK_DIV,  0x08, false),  // 2: DAC1_CLK
+        (true,  SYSREF_DIV,   0x08, true),   // 3: DAC1_SYSREF
+        (false, 0,            0x08, false),  // 4: ADC2_CLK
+        (false, 0,            0x08, true),   // 5: ADC2_SYSREF
+        (false, 0,            0x08, false),  // 6: GTP_CLK2
+        (true,  SYSREF_DIV,   0x10, true),   // 7: FPGA_DAC_SYSREF, LVDS
+        (true,  FPGA_CLK_DIV, 0x08, false),  // 8: GTP_CLK1
+        (false, 0,            0x10, true),   // 9: AMC_MASTER_AUX_CLK
+        (true,  FPGA_CLK_DIV, 0x10, true),   // 10: RTM_MASTER_AUX_CLK, LVDS, used for DDMTD RTIO/SYSREF alignment
+        (false, 0,            0x10, true),   // 11: FPGA_ADC_SYSREF
+        (false, 0,            0x08, false),  // 12: ADC1_CLK
+        (false, 0,            0x08, true),   // 13: ADC1_SYSREF
+    ];
 
     fn spi_setup() {
         unsafe {
@@ -179,6 +199,12 @@ pub mod hmc7043 {
             csr::converter_spi::length_write(24 - 1);
             csr::converter_spi::div_write(16 - 2);
             csr::converter_spi::cs_write(1 << csr::CONFIG_CONVERTER_SPI_HMC7043_CS);
+        }
+    }
+
+    fn spi_wait_idle() {
+        unsafe {
+            while csr::converter_spi::idle_read() == 0 {}
         }
     }
 
@@ -211,102 +237,214 @@ pub mod hmc7043 {
         }
     }
 
-    pub fn detect() -> Result<(), &'static str> {
+    pub const CHIP_ID: u32 = 0xf17904;
+
+    pub fn get_id() -> u32 {
         spi_setup();
-        let id = (read(0x78) as u32) << 16 | (read(0x79) as u32) << 8 | read(0x7a) as u32;
-        if id != 0xf17904 {
+        (read(0x78) as u32) << 16 | (read(0x79) as u32) << 8 | read(0x7a) as u32
+    }
+
+    pub fn detect() -> Result<(), &'static str> {
+        let id = get_id();
+        if id != CHIP_ID {
             error!("invalid HMC7043 ID: 0x{:08x}", id);
             return Err("invalid HMC7043 identification");
-        } else {
-            info!("HMC7043 found");
         }
 
         Ok(())
     }
 
-    pub fn shutdown() -> Result<(), &'static str> {
-        spi_setup();
-        info!("shutting down");
-        write(0x1, 0x1);   // Sleep mode
+    pub fn enable() {
+        info!("enabling HMC7043");
 
-        Ok(())
+        unsafe {
+            csr::hmc7043_reset::out_write(0);
+        }
+        clock::spin_us(10_000);
+
+        spi_setup();
+        write(0x0, 0x1);   // Software reset
+        write(0x0, 0x0);   // Normal operation
+        write(0x1, 0x48);  // mute all outputs
     }
 
-    pub fn init() -> Result<(), &'static str> {
+    const GPO_MUX_CLK_OUT_PHASE: u8 = 3;
+    const GPO_MUX_FORCE1: u8 = 10;
+    const GPO_MUX_FORCE0: u8 = 11;
+
+    /* Read an HMC7043 internal status bit through the GPO interface.
+     * This method is required to work around bugs in the register interface.
+     */
+    fn gpo_indirect_read(mux_setting: u8) -> bool {
+        write(0x50, (mux_setting << 2) | 0x3);
+        spi_wait_idle();
+        unsafe {
+            csr::hmc7043_gpo::in_read() == 1
+        }
+    }
+
+    pub fn init() {
         spi_setup();
         info!("loading configuration...");
 
-        write(0x0, 0x1);   // Software reset
-        write(0x0, 0x0);
-
-        write(0x1, 0x40);  // Enable high-performace/low-noise mode
-        write(0x3, 0x10);  // Disable SYSREF timer
-        write(0xA, 0x06);  // Disable the REFSYNCIN input
+        write(0x3, 0x14);  // Disable the RFSYNCIN reseeder
+        write(0xA, 0x06);  // Disable the RFSYNCIN input buffer
         write(0xB, 0x07);  // Enable the CLKIN input as LVPECL
-        write(0x50, 0x1f); // Disable GPO pin
         write(0x9F, 0x4d); // Unexplained high-performance mode
         write(0xA0, 0xdf); // Unexplained high-performance mode
 
         // Enable required output groups
-        write(0x4, (1 << 0) |
-                   (1 << 1) |
-                   (1 << 3) |
-                   (1 << 4) |
-                   (1 << 5));
+        let mut output_group_en = 0;
+        for channel in 0..OUTPUT_CONFIG.len() {
+            let enabled = OUTPUT_CONFIG[channel].0;
+            if enabled {
+                let group = channel/2;
+                output_group_en |= 1 << group;
+            }
+        }
+        write(0x4, output_group_en);
 
-        for channel in 0..14 {
+        // Set SYSREF timer divider.
+        // We don't need this "feature", but the HMC7043 won't work without.
+        write(0x5c, (HMC_SYSREF_DIV & 0xff) as u8);
+        write(0x5d, ((HMC_SYSREF_DIV & 0xf00) >> 8) as u8);
+
+        for channel in 0..OUTPUT_CONFIG.len() {
             let channel_base = 0xc8 + 0x0a*(channel as u16);
-            let (enabled, divider, aphase, dphase) = OUTPUT_CONFIG[channel];
+            let (enabled, divider, outcfg, is_sysref) = OUTPUT_CONFIG[channel];
 
             if enabled {
-                // Only clock channels need to be high-performance
-                if (channel % 2) == 0 { write(channel_base, 0x91); }
-                else { write(channel_base, 0x11); }
+                if !is_sysref {
+                    // DCLK channel: enable high-performance mode
+                    write(channel_base, 0xd1);
+                } else {
+                    // SYSREF channel: disable hi-perf mode, enable slip
+                    write(channel_base, 0x71);
+                }
+            } else {
+                write(channel_base, 0x10);
             }
-            else { write(channel_base, 0x10); }
-            write(channel_base + 0x1, (divider & 0x0ff) as u8);
-            write(channel_base + 0x2, ((divider & 0x700) >> 8) as u8);
-            write(channel_base + 0x3, aphase & 0x1f);
-            write(channel_base + 0x4, dphase & 0x1f);
+            write(channel_base + 0x1, (divider & 0xff) as u8);
+            write(channel_base + 0x2, ((divider & 0xf00) >> 8) as u8);
 
-            // No analog phase shift on clock channels
-            if (channel % 2) == 0 { write(channel_base + 0x7, 0x00); }
-            else { write(channel_base + 0x7, 0x01); }
+            // bypass analog phase shift on DCLK channels to reduce noise
+            if !is_sysref {
+                if divider != 0 {
+                    write(channel_base + 0x7, 0x00); // enable divider
+                } else {
+                    write(channel_base + 0x7, 0x03); // bypass divider for lowest noise
+                }
+            } else {
+                write(channel_base + 0x7, 0x01);
+            }
 
-            write(channel_base + 0x8, 0x08)
+            write(channel_base + 0x8, outcfg)
         }
 
-        info!("  ...done");
+        write(0x1, 0x4a);  // Reset dividers and FSMs
+        write(0x1, 0x48);
+        write(0x1, 0xc8);  // Synchronize dividers
+        write(0x1, 0x40);  // Unmute, high-performance/low-noise mode
 
+        clock::spin_us(10_000);
+
+        info!("  ...done");
+    }
+
+    pub fn test_gpo() -> Result<(), &'static str> {
+        info!("testing GPO...");
+        for trial in 0..10 {
+            if !gpo_indirect_read(GPO_MUX_FORCE1) {
+                info!("  ...failed. GPO I/O did not go high (#{})", trial + 1);
+                return Err("GPO is not functioning");
+            }
+            if gpo_indirect_read(GPO_MUX_FORCE0) {
+                info!("  ...failed. GPO I/O did not return low (#{})", trial + 1);
+                return Err("GPO is not functioning");
+            }
+        }
+        info!("  ...passed");
         Ok(())
     }
 
-    pub fn cfg_dac_sysref(dacno: u8, phase: u16) {
-        spi_setup();
-        /*  Analog delay resolution: 25ps
-         *  Digital delay resolution: 1/2 input clock cycle = 416ps for 1.2GHz
-         *  16*25ps = 400ps: limit analog delay to 16 steps instead of 32.
+    pub fn check_phased() -> Result<(), &'static str> {
+        if !gpo_indirect_read(GPO_MUX_CLK_OUT_PHASE) {
+            return Err("GPO reported phases did not align");
+        }
+        // Should be the same as the GPO read
+        let sysref_fsm_status = read(0x91);
+        if sysref_fsm_status != 0x2 {
+            error!("Bad SYSREF FSM status: {:02x}", sysref_fsm_status);
+            return Err("Bad SYSREF FSM status");
+        }
+        Ok(())
+    }
+
+    pub fn enable_fpga_ibuf() {
+        /*
+         * Never missing an opportunity to be awful, the HMC7043 produces broadband noise
+         * prior to intialization, which can upset the FPGA.
+         * One mitigation technique is to disable the input buffer until the HMC7043 is
+         * slightly better behaved.
          */
-        if dacno == 0 {
-            write(0x00d5, (phase & 0xf) as u8);
-            write(0x00d6, ((phase >> 4) & 0x1f) as u8);
-        } else if dacno == 1 {
-            write(0x00e9, (phase & 0xf) as u8);
-            write(0x00ea, ((phase >> 4) & 0x1f) as u8);
-        } else {
-            unimplemented!();
+        unsafe {
+            csr::ad9154_crg::ibuf_disable_write(0);
         }
     }
 
+    pub fn sysref_delay_dac(dacno: u8, phase_offset: u8) {
+        spi_setup();
+        if dacno == 0 {
+            write(0x00d5, phase_offset);
+        } else if dacno == 1 {
+            write(0x00e9, phase_offset);
+        } else {
+            unimplemented!();
+        }
+        clock::spin_us(100);
+    }
+
+    pub fn sysref_slip() {
+        spi_setup();
+        write(0x0002, 0x02);
+        write(0x0002, 0x00);
+        clock::spin_us(100);
+    }
 }
 
 pub fn init() -> Result<(), &'static str> {
+    // used by MasterDAC - HMC830 is clocked from 100MHz reference
+    #[cfg(all(hmc830_ref = "100", rtio_frequency = "125.0"))]
+    const DIV: (u32, u32, u32, u32) = (1, 20, 0, 1);  // 100MHz -> 2.0GHz
+    #[cfg(all(hmc830_ref = "100", rtio_frequency = "150.0"))]
+    const DIV: (u32, u32, u32, u32) = (1, 24, 0, 1);  // 100MHz -> 2.4GHz
+
+    // used by Satellite - HMC830 is clocked by recovered clock
+    // (or a clock of the same frequency derived from the same oscillator)
+    #[cfg(all(hmc830_ref = "125", rtio_frequency = "125.0"))]
+    const DIV: (u32, u32, u32, u32) = (2, 32, 0, 1); // 125MHz -> 2.0GHz
+    #[cfg(all(hmc830_ref = "150", rtio_frequency = "150.0"))]
+    const DIV: (u32, u32, u32, u32) = (2, 32, 0, 1); // 150MHz -> 2.4GHz
+
     clock_mux::init();
     /* do not use other SPI devices before HMC830 SPI mode selection */
     hmc830::select_spi_mode();
     hmc830::detect()?;
+    hmc830::init();
+
+    hmc830::set_dividers(DIV.0, DIV.1, DIV.2, DIV.3);
+
+    hmc830::check_locked()?;
+
+    if hmc7043::get_id() == hmc7043::CHIP_ID {
+        error!("HMC7043 detected while in reset (board rework missing?)");
+    }
+    hmc7043::enable();
     hmc7043::detect()?;
-    hmc7043::shutdown()?;
-    hmc830::init()?;
-    hmc7043::init()
+    hmc7043::init();
+    hmc7043::test_gpo()?;
+    hmc7043::check_phased()?;
+    hmc7043::enable_fpga_ibuf();
+
+    Ok(())
 }

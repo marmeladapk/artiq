@@ -28,7 +28,7 @@ pub mod rpc_queue;
 #[cfg(has_si5324)]
 pub mod si5324;
 
-#[cfg(has_slave_fpga)]
+#[cfg(has_slave_fpga_cfg)]
 pub mod slave_fpga;
 #[cfg(has_serwb_phy_amc)]
 pub mod serwb;
@@ -38,10 +38,14 @@ pub mod hmc830_7043;
 mod ad9154_reg;
 #[cfg(has_ad9154)]
 pub mod ad9154;
+#[cfg(has_ad9154)]
+pub mod jesd204sync;
 #[cfg(has_allaki_atts)]
 pub mod hmc542;
+
 #[cfg(has_grabber)]
 pub mod grabber;
 
 #[cfg(has_drtio)]
 pub mod drtioaux;
+pub mod drtio_routing;

@@ -4,13 +4,15 @@ modified by one process (the *publisher*) with copies of it (the
 
 Synchronization is achieved by sending a full copy of the structure to each
 subscriber upon connection (*initialization*), followed by dictionaries
-describing each modification made to the structure (*mods*).
+describing each modification made to the structure (*mods*, see
+:class:`ModAction`).
 
 Structures must be PYON serializable and contain only lists, dicts, and
 immutable types. Lists and dicts can be nested arbitrarily.
 """
 
 import asyncio
+from enum import Enum, unique
 from operator import getitem
 from functools import partial
 
@@ -19,26 +21,69 @@ from artiq.protocols import pyon
 from artiq.protocols.asyncio_server import AsyncioServer
 
 
-_init_string = b"ARTIQ sync_struct\n"
+_protocol_banner = b"ARTIQ sync_struct\n"
+
+
+@unique
+class ModAction(Enum):
+    """Describes the type of incremental modification.
+
+    `Mods` are represented by a dictionary ``m``. ``m["action"]`` describes
+    the type of modification, as per this enum, serialized as a string if
+    required.
+
+    The path (member field) the change applies to is given in
+    ``m["path"]`` as a list; elements give successive levels of indexing. (There
+    is no ``path`` on initial initialization.)
+
+    Details on the modification are stored in additional data fields specific
+    to each type.
+
+    For example, this represents appending the value ``42`` to an array
+    ``data.counts[0]``: ::
+
+        {
+            "action": "append",
+            "path": ["data", "counts", 0],
+            "x": 42
+        }
+    """
+
+    #: A full copy of the data is sent in `struct`; no `path` given.
+    init = "init"
+
+    #: Appends `x` to target list.
+    append = "append"
+
+    #: Inserts `x` into target list at index `i`.
+    insert = "insert"
+
+    #: Removes index `i` from target list.
+    pop = "pop"
+
+    #: Sets target's `key` to `value`.
+    setitem = "setitem"
+
+    #: Removes target's `key`.
+    delitem = "delitem"
+
+
+# Handlers to apply a given mod to a target dict, invoked with (target, mod).
+_mod_appliers = {
+    ModAction.append: lambda t, m: t.append(m["x"]),
+    ModAction.insert: lambda t, m: t.insert(m["i"], m["x"]),
+    ModAction.pop: lambda t, m: t.pop(m["i"]),
+    ModAction.setitem: lambda t, m: t.__setitem__(m["key"], m["value"]),
+    ModAction.delitem: lambda t, m: t.__delitem__(m["key"])
+}
 
 
 def process_mod(target, mod):
     """Apply a *mod* to the target, mutating it."""
     for key in mod["path"]:
         target = getitem(target, key)
-    action = mod["action"]
-    if action == "append":
-        target.append(mod["x"])
-    elif action == "insert":
-        target.insert(mod["i"], mod["x"])
-    elif action == "pop":
-        target.pop(mod["i"])
-    elif action == "setitem":
-        target.__setitem__(mod["key"], mod["value"])
-    elif action == "delitem":
-        target.__delitem__(mod["key"])
-    else:
-        raise ValueError
+
+    _mod_appliers[ModAction(mod["action"])](target, mod)
 
 
 class Subscriber:
@@ -71,7 +116,7 @@ class Subscriber:
         try:
             if before_receive_cb is not None:
                 before_receive_cb()
-            self.writer.write(_init_string)
+            self.writer.write(_protocol_banner)
             self.writer.write((self.notifier_name + "\n").encode())
             self.receive_task = asyncio.ensure_future(self._receive_cr())
         except:
@@ -117,28 +162,29 @@ class Subscriber:
 class Notifier:
     """Encapsulates a structure whose changes need to be published.
 
-    All mutations to the structure must be made through the ``Notifier``. The
+    All mutations to the structure must be made through the :class:`.Notifier`. The
     original structure must only be accessed for reads.
 
-    In addition to the list methods below, the ``Notifier`` supports the index
+    In addition to the list methods below, the :class:`.Notifier` supports the index
     syntax for modification and deletion of elements. Modification of nested
     structures can be also done using the index syntax, for example:
 
     >>> n = Notifier([])
     >>> n.append([])
     >>> n[0].append(42)
-    >>> n.read
+    >>> n.raw_view
     [[42]]
 
     This class does not perform any network I/O and is meant to be used with
-    e.g. the ``Publisher`` for this purpose. Only one publisher at most can be
-    associated with a ``Notifier``.
+    e.g. the :class:`.Publisher` for this purpose. Only one publisher at most can be
+    associated with a :class:`.Notifier`.
 
-    :param backing_struct: Structure to encapsulate. For convenience, it
-        also becomes available as the ``read`` property of the ``Notifier``.
+    :param backing_struct: Structure to encapsulate.
     """
     def __init__(self, backing_struct, root=None, path=[]):
-        self.read = backing_struct
+        #: The raw data encapsulated (read-only!).
+        self.raw_view = backing_struct
+
         if root is None:
             self.root = self
             self.publish = None
@@ -154,7 +200,7 @@ class Notifier:
         """Append to a list."""
         self._backing_struct.append(x)
         if self.root.publish is not None:
-            self.root.publish({"action": "append",
+            self.root.publish({"action": ModAction.append.value,
                                "path": self._path,
                                "x": x})
 
@@ -162,17 +208,17 @@ class Notifier:
         """Insert an element into a list."""
         self._backing_struct.insert(i, x)
         if self.root.publish is not None:
-            self.root.publish({"action": "insert",
+            self.root.publish({"action": ModAction.insert.value,
                                "path": self._path,
                                "i": i, "x": x})
 
     def pop(self, i=-1):
         """Pop an element from a list. The returned element is not
-        encapsulated in a ``Notifier`` and its mutations are no longer
+        encapsulated in a :class:`.Notifier` and its mutations are no longer
         tracked."""
         r = self._backing_struct.pop(i)
         if self.root.publish is not None:
-            self.root.publish({"action": "pop",
+            self.root.publish({"action": ModAction.pop.value,
                                "path": self._path,
                                "i": i})
         return r
@@ -180,7 +226,7 @@ class Notifier:
     def __setitem__(self, key, value):
         self._backing_struct.__setitem__(key, value)
         if self.root.publish is not None:
-            self.root.publish({"action": "setitem",
+            self.root.publish({"action": ModAction.setitem.value,
                                "path": self._path,
                                "key": key,
                                "value": value})
@@ -188,7 +234,7 @@ class Notifier:
     def __delitem__(self, key):
         self._backing_struct.__delitem__(key)
         if self.root.publish is not None:
-            self.root.publish({"action": "delitem",
+            self.root.publish({"action": ModAction.delitem.value,
                                "path": self._path,
                                "key": key})
 
@@ -197,13 +243,34 @@ class Notifier:
         return Notifier(item, self.root, self._path + [key])
 
 
+def update_from_dict(target, source):
+    """Updates notifier contents from given source dictionary.
+
+    Only the necessary changes are performed; unchanged fields are not written.
+    (Currently, modifications are only performed at the top level. That is,
+    whenever there is a change to a child array/struct the entire member is
+    updated instead of choosing a more optimal set of mods.)
+    """
+    curr = target.raw_view
+
+    # Delete removed keys.
+    for k in list(curr.keys()):
+        if k not in source:
+            del target[k]
+
+    # Insert/update changed data.
+    for k in source.keys():
+        if k not in curr or curr[k] != source[k]:
+            target[k] = source[k]
+
+
 class Publisher(AsyncioServer):
     """A network server that publish changes to structures encapsulated in
-    ``Notifiers``.
+    a :class:`.Notifier`.
 
     :param notifiers: A dictionary containing the notifiers to associate with
-        the ``Publisher``. The keys of the dictionary are the names of the
-        notifiers to be used with ``Subscriber``.
+        the :class:`.Publisher`. The keys of the dictionary are the names of the
+        notifiers to be used with :class:`.Subscriber`.
     """
     def __init__(self, notifiers):
         AsyncioServer.__init__(self)
@@ -217,7 +284,7 @@ class Publisher(AsyncioServer):
     async def _handle_connection_cr(self, reader, writer):
         try:
             line = await reader.readline()
-            if line != _init_string:
+            if line != _protocol_banner:
                 return
 
             line = await reader.readline()
@@ -230,7 +297,7 @@ class Publisher(AsyncioServer):
             except KeyError:
                 return
 
-            obj = {"action": "init", "struct": notifier.read}
+            obj = {"action": ModAction.init.value, "struct": notifier.raw_view}
             line = pyon.encode(obj) + "\n"
             writer.write(line.encode())
 
@@ -244,8 +311,8 @@ class Publisher(AsyncioServer):
                     await writer.drain()
             finally:
                 self._recipients[notifier_name].remove(queue)
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
-            # subscribers disconnecting are a normal occurence
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
+            # subscribers disconnecting are a normal occurrence
             pass
         finally:
             writer.close()

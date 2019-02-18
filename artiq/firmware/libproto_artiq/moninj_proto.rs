@@ -32,7 +32,8 @@ pub fn read_magic<R>(reader: &mut R) -> Result<(), Error<R::ReadError>>
 
 #[derive(Debug)]
 pub enum HostMessage {
-    Monitor { enable: bool, channel: u32, probe: u8 },
+    MonitorProbe { enable: bool, channel: u32, probe: u8 },
+    MonitorInjection { enable: bool, channel: u32, overrd: u8 },
     Inject { channel: u32, overrd: u8, value: u8 },
     GetInjectionStatus { channel: u32, overrd: u8 }
 }
@@ -48,7 +49,7 @@ impl HostMessage {
         where R: Read + ?Sized
     {
         Ok(match reader.read_u8()? {
-            0 => HostMessage::Monitor {
+            0 => HostMessage::MonitorProbe {
                 enable: if reader.read_u8()? == 0 { false } else { true },
                 channel: reader.read_u32()?,
                 probe: reader.read_u8()?
@@ -59,6 +60,11 @@ impl HostMessage {
                 value: reader.read_u8()?
             },
             2 => HostMessage::GetInjectionStatus {
+                channel: reader.read_u32()?,
+                overrd: reader.read_u8()?
+            },
+            3 => HostMessage::MonitorInjection {
+                enable: if reader.read_u8()? == 0 { false } else { true },
                 channel: reader.read_u32()?,
                 overrd: reader.read_u8()?
             },
